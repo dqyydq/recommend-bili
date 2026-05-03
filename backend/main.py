@@ -12,7 +12,25 @@ from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_poo
 from bili import fetch_fav_folders, fetch_fav_items, search_all, add_favorite, fetch_history
 from classifier import classify_favorites
 
+SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+
 app = FastAPI()
+
+
+async def _scrape_all_folders(uid: str, cookies: dict, folders: list[dict] | None = None) -> list[dict]:
+    """遍历所有收藏夹抓取全量视频，返回带 folder_name 的 items 列表"""
+    if folders is None:
+        folders = await fetch_fav_folders(uid, cookies)
+    all_items: list[dict] = []
+    for folder in folders:
+        fid = folder.get("media_id") or folder.get("id")
+        if not fid:
+            continue
+        items = await fetch_fav_items(fid, cookies)
+        for item in items:
+            item["folder_name"] = folder.get("title", "收藏夹")
+        all_items.extend(items)
+    return all_items
 
 app.add_middleware(
     CORSMiddleware,
@@ -108,7 +126,8 @@ async def api_analyze(request: Request, folder_id: int | None = None, session: d
             if folder_id:
                 folders = [{"id": folder_id, "title": "当前收藏夹"}]
             else:
-                folders = await fetch_fav_folders(uid, cookies)
+                folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+                session["folders"] = folders
             if not folders:
                 yield f"event: error\ndata: {json.dumps({'error': '未找到收藏夹'})}\n\n"
                 return
@@ -121,7 +140,6 @@ async def api_analyze(request: Request, folder_id: int | None = None, session: d
                 items = await fetch_fav_items(fid, cookies)
                 all_items.extend(items)
                 yield f"event: progress\ndata: {json.dumps({'folder_name': folder.get('title', '收藏夹'), 'folder_count': len(items), 'total_collected': len(all_items)})}\n\n"
-                await asyncio.sleep(0.3)
 
             if not all_items:
                 yield f"event: error\ndata: {json.dumps({'error': '收藏夹为空'})}\n\n"
@@ -137,15 +155,7 @@ async def api_analyze(request: Request, folder_id: int | None = None, session: d
             traceback.print_exc()
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
 
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        }
-    )
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 # ---------- 吃灰检测 ----------
@@ -158,22 +168,14 @@ async def api_dust(request: Request, session: dict = Depends(get_session)):
     async def event_stream():
         try:
             yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': 0})}\n\n"
-            folders = await fetch_fav_folders(uid, cookies)
+            folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+            session["folders"] = folders
             if not folders:
                 yield f"event: error\ndata: {json.dumps({'error': '未找到收藏夹'})}\n\n"
                 return
 
-            all_items: list[dict] = []
-            for folder in folders:
-                fid = folder.get("media_id") or folder.get("id")
-                if not fid:
-                    continue
-                items = await fetch_fav_items(fid, cookies)
-                for item in items:
-                    item["folder_name"] = folder.get("title", "收藏夹")
-                all_items.extend(items)
-                yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': len(all_items)})}\n\n"
-                await asyncio.sleep(0.3)
+            all_items = await _scrape_all_folders(uid, cookies, folders=folders)
+            yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': len(all_items)})}\n\n"
 
             yield f"event: progress\ndata: {json.dumps({'phase': 'history', 'count': 0})}\n\n"
             history = await fetch_history(cookies, days=90)
@@ -229,8 +231,7 @@ async def api_dust(request: Request, session: dict = Depends(get_session)):
             traceback.print_exc()
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 # ---------- 搜索 ----------
 
@@ -239,17 +240,9 @@ async def api_search_favorites(q: str = "", session: dict = Depends(get_session)
     try:
         cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
-        folders = await fetch_fav_folders(uid, cookies)
-        results = []
-        for folder in folders:
-            fid = folder.get("media_id") or folder.get("id")
-            if not fid:
-                continue
-            items = await fetch_fav_items(fid, cookies)
-            for item in items:
-                if q.lower() in item["title"].lower() or q.lower() in item.get("intro", "").lower():
-                    item["folder_name"] = folder.get("title", "默认收藏夹")
-                    results.append(item)
+        all_items = await _scrape_all_folders(uid, cookies)
+        results = [item for item in all_items
+                   if q.lower() in item["title"].lower() or q.lower() in item.get("intro", "").lower()]
         return {"results": results, "total": len(results)}
     except Exception as e:
         return {"error": str(e)}

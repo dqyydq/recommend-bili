@@ -47,7 +47,7 @@ async def fetch_fav_folders(uid: str, cookies: dict[str, str] | None = None) -> 
 async def fetch_fav_items(folder_id: int, cookies: dict[str, str] | None = None) -> list[dict]:
     items: list[dict] = []
     page = 1
-    async with _client(cookies, extra_headers={"Referer": "https://space.bilibili.com/"}) as client:
+    async with _client(cookies) as client:
         while True:
             url = f"{BILI_API}/x/v3/fav/resource/list"
             params = {
