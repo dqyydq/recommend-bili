@@ -1,11 +1,14 @@
 import { getFolders } from "./api.js";
 
-const SSE_URL = "http://localhost:8000/api/analyze";
+const SSE_BASE = "http://localhost:8000/api/analyze";
 
 export async function renderClassifyModule(container) {
   container.innerHTML = `
     <div>
       <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px;">
+        <select id="folderSelect" class="input" style="width:200px;">
+          <option value="">全部收藏夹</option>
+        </select>
         <button id="analyzeBtn" class="btn">开始整理</button>
         <button id="cancelBtn" class="btn btn-secondary" style="display:none;">取消</button>
       </div>
@@ -24,6 +27,7 @@ export async function renderClassifyModule(container) {
 
   let abortCtrl = null;
 
+  const folderSelect = document.getElementById("folderSelect");
   const btn = document.getElementById("analyzeBtn");
   const cancelBtn = document.getElementById("cancelBtn");
   const progressArea = document.getElementById("progressArea");
@@ -32,14 +36,31 @@ export async function renderClassifyModule(container) {
   const progressText = document.getElementById("progressText");
   const resultEl = document.getElementById("analyzeResult");
 
-  // 获取收藏夹总数用于进度估算
+  // 加载收藏夹列表
+  let folderList = [];
   let estimatedTotal = 50;
   try {
     const data = await getFolders();
     if (data.folders) {
-      estimatedTotal = Math.max(1, data.folders.length * 20);
+      folderList = data.folders;
+      for (const f of data.folders) {
+        const opt = document.createElement("option");
+        opt.value = f.id || f.media_id || "";
+        opt.textContent = f.title || "收藏夹";
+        folderSelect.appendChild(opt);
+      }
     }
   } catch (e) {}
+
+  folderSelect.addEventListener("change", () => {
+    const fid = folderSelect.value;
+    if (fid) {
+      const f = folderList.find(x => (x.id || x.media_id) == fid);
+      estimatedTotal = f ? f.media_count || 20 : 20;
+    } else {
+      estimatedTotal = Math.max(1, folderList.length * 20);
+    }
+  });
 
   btn.addEventListener("click", () => {
     resultEl.innerHTML = "";
@@ -51,8 +72,11 @@ export async function renderClassifyModule(container) {
     progressPercent.textContent = "0%";
     progressText.textContent = "正在抓取收藏夹…";
 
+    const fid = folderSelect.value;
+    const url = fid ? `${SSE_BASE}?folder_id=${fid}` : SSE_BASE;
+
     abortCtrl = new AbortController();
-    const es = new EventSource(SSE_URL, { withCredentials: true });
+    const es = new EventSource(url, { withCredentials: true });
 
     es.addEventListener("progress", (e) => {
       const d = JSON.parse(e.data);

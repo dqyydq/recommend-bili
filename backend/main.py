@@ -94,7 +94,7 @@ async def api_favorites(folder_id: int, session: dict = Depends(get_session)):
 
 
 @app.get("/api/analyze")
-async def api_analyze(request: Request, session: dict = Depends(get_session)):
+async def api_analyze(request: Request, folder_id: int | None = None, session: dict = Depends(get_session)):
     api_key = session.get("deepseek_key", "")
     if not api_key:
         return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
@@ -104,7 +104,10 @@ async def api_analyze(request: Request, session: dict = Depends(get_session)):
 
     async def event_stream():
         try:
-            folders = await fetch_fav_folders(uid, cookies)
+            if folder_id:
+                folders = [{"id": folder_id, "title": "当前收藏夹"}]
+            else:
+                folders = await fetch_fav_folders(uid, cookies)
             if not folders:
                 yield f"event: error\ndata: {json.dumps({'error': '未找到收藏夹'})}\n\n"
                 return
