@@ -1,4 +1,5 @@
 import asyncio
+import time
 import httpx
 
 BILI_API = "https://api.bilibili.com"
@@ -70,6 +71,7 @@ async def fetch_fav_items(folder_id: int, cookies: dict[str, str] | None = None)
                     "cover": media.get("cover", ""),
                     "link": f"https://www.bilibili.com/video/{media.get('bvid', '')}",
                     "source_folder": str(folder_id),
+                    "fav_time": media.get("fav_time", 0),
                 })
             if not has_more or not medias:
                 break
@@ -141,3 +143,38 @@ async def get_user_info(uid: str) -> dict:
             "nickname": info.get("name", ""),
             "avatar": info.get("face", ""),
         }
+
+
+async def fetch_history(cookies: dict[str, str], days: int = 90) -> list[dict]:
+    """拉取最近 N 天 B站观看历史"""
+    cutoff = time.time() - days * 86400
+    history: list[dict] = []
+    max_id = 0
+    async with _client(cookies) as client:
+        while True:
+            url = f"{BILI_API}/x/web-interface/history/cursor"
+            params = {
+                "max": str(max_id) if max_id else "0",
+                "view_at": str(int(cutoff)),
+                "ps": 20,
+                "type": "archive",
+            }
+            resp = await client.get(url, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") != 0:
+                break
+            items = (data.get("data") or {}).get("list", []) or []
+            if not items:
+                break
+            for item in items:
+                history.append({
+                    "bvid": item.get("bvid", ""),
+                    "title": item.get("title", ""),
+                    "view_at": item.get("view_at", 0),
+                })
+            max_id = items[-1].get("view_at", 0)
+            if len(items) < 20:
+                break
+            await asyncio.sleep(0.5)
+    return history

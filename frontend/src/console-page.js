@@ -1,6 +1,7 @@
 import { logout } from "./api.js";
 import { renderClassifyModule } from "./classify-module.js";
 import { renderSearchModule } from "./search-module.js";
+import { renderDustModule } from "./dust-module.js";
 
 export function renderConsole(app, user) {
   app.innerHTML = `
@@ -9,6 +10,7 @@ export function renderConsole(app, user) {
         <div class="logo">收藏夹管家</div>
         <div class="menu-item active" data-page="classify">整理收藏夹</div>
         <div class="menu-item" data-page="search">寻找视频</div>
+        <div class="menu-item" data-page="dust">吃灰检测</div>
       </div>
       <div class="main-area">
         <div class="header">
@@ -30,6 +32,7 @@ export function renderConsole(app, user) {
   const pageMap = {
     classify: { title: "整理收藏夹", render: renderClassifyModule },
     search: { title: "寻找视频", render: renderSearchModule },
+    dust: { title: "吃灰检测", render: renderDustModule },
   };
 
   document.querySelectorAll(".menu-item").forEach(item => {

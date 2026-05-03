@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,7 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool
-from bili import fetch_fav_folders, fetch_fav_items, search_all, add_favorite
+from bili import fetch_fav_folders, fetch_fav_items, search_all, add_favorite, fetch_history
 from classifier import classify_favorites
 
 app = FastAPI()
@@ -146,6 +147,90 @@ async def api_analyze(request: Request, folder_id: int | None = None, session: d
         }
     )
 
+
+# ---------- 吃灰检测 ----------
+
+@app.get("/api/dust")
+async def api_dust(request: Request, session: dict = Depends(get_session)):
+    cookies = session.get("bili_cookies", {})
+    uid = session.get("uid", "")
+
+    async def event_stream():
+        try:
+            yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': 0})}\n\n"
+            folders = await fetch_fav_folders(uid, cookies)
+            if not folders:
+                yield f"event: error\ndata: {json.dumps({'error': '未找到收藏夹'})}\n\n"
+                return
+
+            all_items: list[dict] = []
+            for folder in folders:
+                fid = folder.get("media_id") or folder.get("id")
+                if not fid:
+                    continue
+                items = await fetch_fav_items(fid, cookies)
+                for item in items:
+                    item["folder_name"] = folder.get("title", "收藏夹")
+                all_items.extend(items)
+                yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': len(all_items)})}\n\n"
+                await asyncio.sleep(0.3)
+
+            yield f"event: progress\ndata: {json.dumps({'phase': 'history', 'count': 0})}\n\n"
+            history = await fetch_history(cookies, days=90)
+            watched_bvids = {h["bvid"] for h in history}
+            bvid_to_view_at = {h["bvid"]: h["view_at"] for h in history}
+            yield f"event: progress\ndata: {json.dumps({'phase': 'history', 'count': len(history)})}\n\n"
+
+            now = time.time()
+            DUST = 60 * 86400
+            LIGHT = 30 * 86400
+
+            dust_list: list[dict] = []
+            light_list: list[dict] = []
+            watched_list: list[dict] = []
+            fresh_list: list[dict] = []
+            for item in all_items:
+                fav_time = item.get("fav_time", 0)
+                age = now - fav_time
+                rec = {
+                    "bvid": item.get("bvid", ""),
+                    "title": item.get("title", ""),
+                    "cover": item.get("cover", ""),
+                    "upper": item.get("upper", ""),
+                    "link": item.get("link", ""),
+                    "fav_time": fav_time,
+                    "folder_name": item.get("folder_name", ""),
+                }
+                if item.get("bvid") in watched_bvids:
+                    rec["view_at"] = bvid_to_view_at[item["bvid"]]
+                    rec["dust_level"] = "watched"
+                    watched_list.append(rec)
+                elif age > DUST:
+                    rec["dust_level"] = "dust"
+                    dust_list.append(rec)
+                elif age > LIGHT:
+                    rec["dust_level"] = "light_dust"
+                    light_list.append(rec)
+                else:
+                    rec["dust_level"] = "fresh"
+                    fresh_list.append(rec)
+
+            result = {
+                "total": len(all_items),
+                "dust": dust_list,
+                "light_dust": light_list,
+                "watched": watched_list,
+                "fresh": fresh_list,
+            }
+            yield f"event: result\ndata: {json.dumps(result)}\n\n"
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
 # ---------- 搜索 ----------
 
