@@ -52,7 +52,7 @@ export async function renderClassifyModule(container) {
     progressText.textContent = "正在抓取收藏夹…";
 
     abortCtrl = new AbortController();
-    const es = new EventSource(SSE_URL);
+    const es = new EventSource(SSE_URL, { withCredentials: true });
 
     es.addEventListener("progress", (e) => {
       const d = JSON.parse(e.data);

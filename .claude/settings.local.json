@@ -12,7 +12,8 @@
       "Bash(node *)",
       "Bash(git init *)",
       "Bash(git add *)",
-      "Bash(git -C backend rev-parse --show-toplevel)"
+      "Bash(git -C backend rev-parse --show-toplevel)",
+      "Bash(git commit *)"
     ]
   }
 }
