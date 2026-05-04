@@ -203,20 +203,20 @@ async def get_user_info(uid: str) -> dict:
 
 async def fetch_history(cookies: dict[str, str], days: int = 90,
                       on_progress=None) -> list[dict]:
-    """拉取最近 N 天 B站观看历史，支持进度回调，单页失败不崩溃"""
+    """拉取最近 N 天 B站观看历史，支持进度回调"""
     cutoff = time.time() - days * 86400
     history: list[dict] = []
     max_id = 0
-    print(f"[history] 开始拉取观看历史, cutoff={cutoff}, days={days}")
+    print(f"[history] 开始拉取观看历史, days={days}, cutoff_ts={int(cutoff)}")
     async with _client(cookies) as client:
         while True:
             url = f"{BILI_API}/x/web-interface/history/cursor"
-            params = {
-                "max": str(max_id) if max_id else "0",
-                "view_at": str(int(cutoff)),
+            params: dict = {
                 "ps": 20,
                 "type": "archive",
             }
+            if max_id:
+                params["max"] = str(max_id)
             try:
                 resp = await client.get(url, params=params, timeout=30)
                 resp.raise_for_status()
@@ -227,18 +227,24 @@ async def fetch_history(cookies: dict[str, str], days: int = 90,
             code = data.get("code")
             items = (data.get("data") or {}).get("list", []) or []
             has_more = (data.get("data") or {}).get("has_more", False)
-            print(f"[history] page max_id={max_id} code={code} items={len(items)} has_more={has_more}")
+            print(f"[history] page max={max_id} code={code} items={len(items)} has_more={has_more}")
             if code != 0:
                 print(f"[history] API code={code} msg={data.get('message')} — 停止拉取")
                 break
             if not items:
-                print(f"[history] 无更多记录 — 停止拉取")
                 break
             for item in items:
+                view_at = item.get("view_at", 0)
+                # 超过 N 天前的记录，停止拉取
+                if view_at < cutoff:
+                    print(f"[history] 已到达 {days} 天前的记录 (view_at={view_at} < cutoff={int(cutoff)}) — 停止拉取")
+                    if on_progress:
+                        await on_progress(len(history))
+                    return history
                 history.append({
                     "bvid": item.get("bvid", ""),
                     "title": item.get("title", ""),
-                    "view_at": item.get("view_at", 0),
+                    "view_at": view_at,
                 })
             if on_progress:
                 await on_progress(len(history))
