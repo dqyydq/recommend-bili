@@ -40,7 +40,18 @@ async def fetch_fav_folders(uid: str, cookies: dict[str, str] | None = None) -> 
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") == 0:
-            return (data.get("data") or {}).get("list", [])
+            folders = (data.get("data") or {}).get("list", [])
+            if folders:
+                return folders
+
+        # 兜底：部分用户的默认收藏夹不在 created/list-all 里
+        url2 = f"{BILI_API}/x/v3/fav/folder/list"
+        params2 = {"up_mid": uid, "pn": 1, "ps": 20}
+        resp2 = await client.get(url2, params=params2, timeout=30)
+        resp2.raise_for_status()
+        data2 = resp2.json()
+        if data2.get("code") == 0:
+            return (data2.get("data") or {}).get("list", [])
         return []
 
 
@@ -90,13 +101,13 @@ async def fetch_fav_items(folder_id: int, cookies: dict[str, str] | None = None,
     return items
 
 
-_FOLDER_SEM = asyncio.Semaphore(3)
+_FOLDER_SEM = asyncio.Semaphore(2)
 
 
 async def fetch_all_items(uid: str, cookies: dict[str, str] | None = None,
                           folders: list[dict] | None = None,
                           on_progress=None) -> list[dict]:
-    """并行抓取所有收藏夹的视频，支持进度回调"""
+    """并行抓取所有收藏夹的视频（共享 client + 错峰启动）"""
     if folders is None:
         folders = await fetch_fav_folders(uid, cookies)
     valid = {f.get("media_id") or f.get("id"): f
@@ -104,12 +115,20 @@ async def fetch_all_items(uid: str, cookies: dict[str, str] | None = None,
     if not valid:
         return []
 
-    async def _fetch_one(fid: int):
-        async with _FOLDER_SEM:
-            return await fetch_fav_items(fid, cookies)
-
     fids = list(valid.keys())
-    results = await asyncio.gather(*[_fetch_one(fid) for fid in fids], return_exceptions=True)
+
+    async with _client(cookies) as client:
+
+        async def _fetch_one(fid: int, idx: int):
+            # 错峰启动：每个任务间隔 0.15s，避免同时建连触发风控
+            await asyncio.sleep(idx * 0.15)
+            async with _FOLDER_SEM:
+                return await fetch_fav_items(fid, cookies, client=client)
+
+        results = await asyncio.gather(
+            *[_fetch_one(fid, i) for i, fid in enumerate(fids)],
+            return_exceptions=True,
+        )
 
     all_items: list[dict] = []
     for fid, items in zip(fids, results):
