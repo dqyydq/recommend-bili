@@ -101,52 +101,36 @@ async def fetch_fav_items(folder_id: int, cookies: dict[str, str] | None = None,
     return items
 
 
-_FOLDER_SEM = asyncio.Semaphore(2)
-
-
 async def fetch_all_items(uid: str, cookies: dict[str, str] | None = None,
                           folders: list[dict] | None = None,
                           on_progress=None) -> list[dict]:
-    """并行抓取所有收藏夹的视频（共享 client + 错峰启动）"""
+    """串行抓取所有收藏夹的视频（共享 client 复用连接，0.3s 分页间隔）"""
     if folders is None:
         folders = await fetch_fav_folders(uid, cookies)
-    valid = {f.get("media_id") or f.get("id"): f
-             for f in folders if f.get("media_id") or f.get("id")}
+    valid = [(f.get("media_id") or f.get("id"), f)
+             for f in folders if f.get("media_id") or f.get("id")]
     if not valid:
         return []
 
-    fids = list(valid.keys())
-
-    async with _client(cookies) as client:
-
-        async def _fetch_one(fid: int, idx: int):
-            # 错峰启动：每个任务间隔 0.15s，避免同时建连触发风控
-            await asyncio.sleep(idx * 0.15)
-            async with _FOLDER_SEM:
-                return await fetch_fav_items(fid, cookies, client=client)
-
-        results = await asyncio.gather(
-            *[_fetch_one(fid, i) for i, fid in enumerate(fids)],
-            return_exceptions=True,
-        )
-
     all_items: list[dict] = []
-    for fid, items in zip(fids, results):
-        folder = valid[fid]
-        fname = folder.get("title", "收藏夹")
-        if isinstance(items, Exception):
-            print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 抓取异常: {items}")
-            continue
-        if not items:
-            print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 返回 0 条，可能被限流或为空")
-        for item in items:
-            item["folder_name"] = fname
-            item["folder_id"] = fid
-        all_items.extend(items)
-        if on_progress:
-            await on_progress(fname, len(items), len(all_items))
+    async with _client(cookies) as client:
+        for fid, folder in valid:
+            fname = folder.get("title", "收藏夹")
+            try:
+                items = await fetch_fav_items(fid, cookies, client=client)
+            except Exception as e:
+                print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 抓取异常: {e}")
+                continue
+            if not items:
+                print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 返回 0 条")
+            for item in items:
+                item["folder_name"] = fname
+                item["folder_id"] = fid
+            all_items.extend(items)
+            if on_progress:
+                await on_progress(fname, len(items), len(all_items))
 
-    print(f"[fetch_all] 完成: {len(all_items)} 条, {len(fids)} 个收藏夹")
+    print(f"[fetch_all] 完成: {len(all_items)} 条, {len(folders)} 个收藏夹")
     return all_items
 
 
