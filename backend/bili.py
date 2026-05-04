@@ -213,6 +213,7 @@ async def fetch_history(cookies: dict[str, str], days: int = 90,
             url = f"{BILI_API}/x/web-interface/history/cursor"
             params: dict = {
                 "max": str(max_id),
+                "view_at": str(max_id),  # B站游标分页：max 和 view_at 用同一个值
                 "ps": 20,
                 "type": "archive",
             }
