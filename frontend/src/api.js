@@ -35,6 +35,17 @@ export function setApiKey(apiKey) {
   });
 }
 
+export function getSettings() {
+  return request("/settings");
+}
+
+export function setModel(model) {
+  return request("/settings/model", {
+    method: "POST",
+    body: JSON.stringify({ model }),
+  });
+}
+
 export function getFolders() {
   return request("/folders");
 }
