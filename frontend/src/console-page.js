@@ -133,4 +133,9 @@ export function renderConsole(app, user) {
 
   // 默认加载整理收藏夹
   renderClassifyModule(contentArea);
+
+  // 首次登录无 Key → 自动弹出设置弹窗
+  if (!user.has_key) {
+    setTimeout(() => showSettingsModal(), 500);
+  }
 }
