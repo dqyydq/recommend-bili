@@ -97,6 +97,7 @@ export async function renderDustModule(container) {
     es.addEventListener("error", (e) => {
       es.close();
       resetUI();
+      progressArea.style.display = "none";
       let msg = "检测失败";
       try {
         if (e.data) {
@@ -110,6 +111,7 @@ export async function renderDustModule(container) {
     es.onerror = () => {
       es.close();
       resetUI();
+      progressArea.style.display = "none";
       resultEl.innerHTML = `<p style="color:#f43f5e;">连接中断，请重试</p>`;
     };
 

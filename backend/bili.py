@@ -203,7 +203,7 @@ async def get_user_info(uid: str) -> dict:
 
 async def fetch_history(cookies: dict[str, str], days: int = 90,
                       on_progress=None) -> list[dict]:
-    """拉取最近 N 天 B站观看历史，支持进度回调"""
+    """拉取最近 N 天 B站观看历史，支持进度回调，单页失败不崩溃"""
     cutoff = time.time() - days * 86400
     history: list[dict] = []
     max_id = 0
@@ -216,9 +216,13 @@ async def fetch_history(cookies: dict[str, str], days: int = 90,
                 "ps": 20,
                 "type": "archive",
             }
-            resp = await client.get(url, params=params, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
+            try:
+                resp = await client.get(url, params=params, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                print(f"[history] 请求失败 (max_id={max_id}): {e}")
+                break
             if data.get("code") != 0:
                 break
             items = (data.get("data") or {}).get("list", []) or []
