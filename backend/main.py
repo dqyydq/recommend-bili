@@ -292,29 +292,37 @@ async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_sessi
     try:
         cookies = session.get("bili_cookies", {})
         csrf = cookies.get("bili_jct", "")
+        if not csrf:
+            return {"error": "缺少 bili_jct (csrf) cookie"}
 
-        # 构造 resources: "aid:type,aid:type" 格式
-        resources = ",".join(f"{item.media_id}:2" for item in req.items if item.media_id)
+        # 按收藏夹分组
+        items_by_folder: dict[int, list[RemoveItem]] = {}
+        for item in req.items:
+            if item.media_id:
+                items_by_folder.setdefault(item.folder_id, []).append(item)
 
-        removed = 0
+        removed_total = 0
         async with _client(cookies) as client:
-            resp = await client.post(
-                "https://api.bilibili.com/x/v3/fav/resource/batch-del",
-                data={
-                    "resources": resources,
-                    "csrf": csrf,
-                },
-                timeout=30,
-            )
-            try:
-                data = resp.json()
-            except Exception:
-                data = {}
-            print(f"[clean/remove] resources={resources[:100]} => code={data.get('code')} msg={data.get('message')}")
-            if data.get("code") == 0:
-                removed = len(req.items)
+            for folder_id, items in items_by_folder.items():
+                resources = ",".join(f"{item.media_id}:2" for item in items)
+                resp = await client.post(
+                    "https://api.bilibili.com/x/v3/fav/resource/batch-del",
+                    data={
+                        "media_id": folder_id,
+                        "resources": resources,
+                        "csrf": csrf,
+                    },
+                    timeout=30,
+                )
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = {}
+                print(f"[clean/remove] folder={folder_id} resources={resources[:100]} => code={data.get('code')} msg={data.get('message')}")
+                if data.get("code") == 0:
+                    removed_total += len(items)
 
-        return {"removed": removed, "total": len(req.items)}
+        return {"removed": removed_total, "total": len(req.items)}
     except Exception as e:
         return {"error": str(e)}
 
