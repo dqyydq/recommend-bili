@@ -3,11 +3,10 @@ const DUST_URL = "http://localhost:8000/api/dust";
 const LABELS = {
   dust: { text: "吃灰", color: "#f43f5e" },
   light_dust: { text: "轻度吃灰", color: "#f59e0b" },
-  watched: { text: "已看", color: "#22c55e" },
-  fresh: { text: "新鲜", color: "#999" },
+  fresh: { text: "新鲜", color: "#22c55e" },
 };
 
-const ORDER = ["dust", "light_dust", "watched", "fresh"];
+const ORDER = ["dust", "light_dust", "fresh"];
 
 export async function renderDustModule(container) {
   container.innerHTML = `
@@ -143,7 +142,7 @@ function renderDustResult(data, el) {
   }).join("");
 
   let html = `
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px;">
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px;">
       ${statCards}
     </div>
     <p style="margin-bottom:12px;color:#666;">共 ${total} 条收藏</p>

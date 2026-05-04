@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool, on_session_updated
-from bili import fetch_fav_folders, fetch_fav_items, fetch_all_items, search_all, add_favorite, fetch_history, _client
+from bili import fetch_fav_folders, fetch_fav_items, fetch_all_items, search_all, add_favorite, _client
 from classifier import classify_favorites
 from clean import scan_invalid
 from storage import save as storage_save, list_history as storage_list, load as storage_load
@@ -226,38 +226,12 @@ async def api_dust(request: Request, session: dict = Depends(get_session)):
             all_items = fetch_task.result()
             yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': len(all_items)})}\n\n"
 
-            yield f"event: progress\ndata: {json.dumps({'phase': 'history', 'count': 0})}\n\n"
-
-            # 观看历史抓取阶段：同样通过队列推送实时进度
-            hist_queue: asyncio.Queue = asyncio.Queue()
-
-            async def on_hist_progress(count):
-                await hist_queue.put(count)
-
-            hist_task = asyncio.create_task(
-                fetch_history(cookies, days=90, on_progress=on_hist_progress)
-            )
-
-            last_hist = 0
-            while not hist_task.done():
-                try:
-                    last_hist = await asyncio.wait_for(hist_queue.get(), timeout=0.3)
-                    yield f"event: progress\ndata: {json.dumps({'phase': 'history', 'count': last_hist})}\n\n"
-                except asyncio.TimeoutError:
-                    pass
-
-            history = hist_task.result()
-            watched_bvids = {h["bvid"] for h in history}
-            bvid_to_view_at = {h["bvid"]: h["view_at"] for h in history}
-            yield f"event: progress\ndata: {json.dumps({'phase': 'history', 'count': len(history)})}\n\n"
-
             now = time.time()
             DUST = 60 * 86400
             LIGHT = 30 * 86400
 
             dust_list: list[dict] = []
             light_list: list[dict] = []
-            watched_list: list[dict] = []
             fresh_list: list[dict] = []
             for item in all_items:
                 fav_time = item.get("fav_time", 0)
@@ -271,11 +245,7 @@ async def api_dust(request: Request, session: dict = Depends(get_session)):
                     "fav_time": fav_time,
                     "folder_name": item.get("folder_name", ""),
                 }
-                if item.get("bvid") in watched_bvids:
-                    rec["view_at"] = bvid_to_view_at[item["bvid"]]
-                    rec["dust_level"] = "watched"
-                    watched_list.append(rec)
-                elif age > DUST:
+                if age > DUST:
                     rec["dust_level"] = "dust"
                     dust_list.append(rec)
                 elif age > LIGHT:
@@ -289,7 +259,6 @@ async def api_dust(request: Request, session: dict = Depends(get_session)):
                 "total": len(all_items),
                 "dust": dust_list,
                 "light_dust": light_list,
-                "watched": watched_list,
                 "fresh": fresh_list,
             }
             yield f"event: result\ndata: {json.dumps(result)}\n\n"
