@@ -281,6 +281,7 @@ class RemoveItem(BaseModel):
     bvid: str
     folder_id: int
     media_id: int = 0
+    id: int = 0
 
 
 class RemoveRequest(BaseModel):

@@ -43,7 +43,6 @@ async def scan_invalid(
         for item in items:
             item["folder_name"] = folder.get("title", "收藏夹")
             item["folder_id"] = fid
-            item["media_id"] = item.get("id", 0)  # 数字ID用于删除API
         all_items.extend(items)
         await asyncio.sleep(0.3)
 

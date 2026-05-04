@@ -64,6 +64,7 @@ async def fetch_fav_items(folder_id: int, cookies: dict[str, str] | None = None)
             has_more = (data.get("data") or {}).get("has_more", False)
             for media in medias:
                 items.append({
+                    "id": media.get("id", 0),
                     "bvid": media.get("bvid", ""),
                     "title": media.get("title", ""),
                     "intro": media.get("intro", ""),
