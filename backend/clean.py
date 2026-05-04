@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import httpx
 from bili import _client, fetch_all_items
@@ -25,14 +26,21 @@ async def scan_invalid(
 ) -> list[dict]:
     """扫描所有收藏夹中的失效视频（并行抓取 + 高并发校验）"""
 
+    t0 = time.time()
     all_items = await fetch_all_items(uid, cookies)
 
     total = len(all_items)
-    print(f"[clean] collected {total} items, verifying...")
+    if total == 0:
+        print("[clean] 无收藏视频，跳过校验")
+        return []
+
+    elapsed_fetch = time.time() - t0
+    print(f"[clean] {total} 条待校验 (抓取耗时 {elapsed_fetch:.1f}s)，启动 {BATCH} 并发...")
 
     sem = asyncio.Semaphore(BATCH)
     invalid: list[dict] = []
     checked = 0
+    t_verify = time.time()
 
     async with _client(cookies) as client:
 
@@ -42,12 +50,16 @@ async def scan_invalid(
                 if await _check_bvid(item["bvid"], client):
                     invalid.append(item)
                 checked += 1
-                if on_progress and (checked % 20 == 0 or checked == total):
+                if on_progress and (checked % 10 == 0 or checked == total):
                     await on_progress(total, checked, len(invalid))
-                elif checked % 50 == 0:
-                    print(f"[clean] verified {checked}/{total}, found {len(invalid)} invalid")
+                elif checked % 20 == 0:
+                    pct = checked * 100 // total
+                    elapsed = time.time() - t_verify
+                    eta = (elapsed / checked) * (total - checked) if checked > 0 else 0
+                    print(f"[clean] {checked}/{total} ({pct}%) 失效 {len(invalid)} | 预计剩余 {eta:.0f}s")
 
         await asyncio.gather(*[verify(item) for item in all_items])
 
-    print(f"[clean] done: {total} checked, {len(invalid)} invalid")
+    elapsed = time.time() - t0
+    print(f"[clean] 完成: {total} 条校验, {len(invalid)} 失效 | 总耗时 {elapsed:.1f}s (抓取 {elapsed_fetch:.1f}s + 校验 {elapsed - elapsed_fetch:.1f}s)")
     return invalid

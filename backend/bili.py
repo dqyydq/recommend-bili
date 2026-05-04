@@ -90,7 +90,7 @@ async def fetch_fav_items(folder_id: int, cookies: dict[str, str] | None = None,
     return items
 
 
-_FOLDER_SEM = asyncio.Semaphore(5)
+_FOLDER_SEM = asyncio.Semaphore(3)
 
 
 async def fetch_all_items(uid: str, cookies: dict[str, str] | None = None,
@@ -113,16 +113,21 @@ async def fetch_all_items(uid: str, cookies: dict[str, str] | None = None,
 
     all_items: list[dict] = []
     for fid, items in zip(fids, results):
-        if isinstance(items, Exception):
-            continue
         folder = valid[fid]
+        fname = folder.get("title", "收藏夹")
+        if isinstance(items, Exception):
+            print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 抓取异常: {items}")
+            continue
+        if not items:
+            print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 返回 0 条，可能被限流或为空")
         for item in items:
-            item["folder_name"] = folder.get("title", "收藏夹")
+            item["folder_name"] = fname
             item["folder_id"] = fid
         all_items.extend(items)
         if on_progress:
-            await on_progress(folder.get("title", ""), len(items), len(all_items))
+            await on_progress(fname, len(items), len(all_items))
 
+    print(f"[fetch_all] 完成: {len(all_items)} 条, {len(fids)} 个收藏夹")
     return all_items
 
 
