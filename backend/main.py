@@ -205,11 +205,48 @@ async def api_dust(request: Request, session: dict = Depends(get_session)):
                 yield f"event: error\ndata: {json.dumps({'error': '未找到收藏夹'})}\n\n"
                 return
 
-            all_items = await fetch_all_items(uid, cookies, folders=folders)
+            # 收藏夹抓取阶段：通过队列桥接 on_progress → SSE
+            fav_queue: asyncio.Queue = asyncio.Queue()
+
+            async def on_fav_progress(title, count, total):
+                await fav_queue.put(total)
+
+            fetch_task = asyncio.create_task(
+                fetch_all_items(uid, cookies, folders=folders, on_progress=on_fav_progress)
+            )
+
+            last_fav = 0
+            while not fetch_task.done():
+                try:
+                    last_fav = await asyncio.wait_for(fav_queue.get(), timeout=0.3)
+                    yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': last_fav})}\n\n"
+                except asyncio.TimeoutError:
+                    pass
+
+            all_items = fetch_task.result()
             yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': len(all_items)})}\n\n"
 
             yield f"event: progress\ndata: {json.dumps({'phase': 'history', 'count': 0})}\n\n"
-            history = await fetch_history(cookies, days=90)
+
+            # 观看历史抓取阶段：同样通过队列推送实时进度
+            hist_queue: asyncio.Queue = asyncio.Queue()
+
+            async def on_hist_progress(count):
+                await hist_queue.put(count)
+
+            hist_task = asyncio.create_task(
+                fetch_history(cookies, days=90, on_progress=on_hist_progress)
+            )
+
+            last_hist = 0
+            while not hist_task.done():
+                try:
+                    last_hist = await asyncio.wait_for(hist_queue.get(), timeout=0.3)
+                    yield f"event: progress\ndata: {json.dumps({'phase': 'history', 'count': last_hist})}\n\n"
+                except asyncio.TimeoutError:
+                    pass
+
+            history = hist_task.result()
             watched_bvids = {h["bvid"] for h in history}
             bvid_to_view_at = {h["bvid"]: h["view_at"] for h in history}
             yield f"event: progress\ndata: {json.dumps({'phase': 'history', 'count': len(history)})}\n\n"

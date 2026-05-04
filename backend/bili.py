@@ -201,8 +201,9 @@ async def get_user_info(uid: str) -> dict:
         }
 
 
-async def fetch_history(cookies: dict[str, str], days: int = 90) -> list[dict]:
-    """拉取最近 N 天 B站观看历史"""
+async def fetch_history(cookies: dict[str, str], days: int = 90,
+                      on_progress=None) -> list[dict]:
+    """拉取最近 N 天 B站观看历史，支持进度回调"""
     cutoff = time.time() - days * 86400
     history: list[dict] = []
     max_id = 0
@@ -229,6 +230,8 @@ async def fetch_history(cookies: dict[str, str], days: int = 90) -> list[dict]:
                     "title": item.get("title", ""),
                     "view_at": item.get("view_at", 0),
                 })
+            if on_progress:
+                await on_progress(len(history))
             max_id = items[-1].get("view_at", 0)
             if len(items) < 20:
                 break
