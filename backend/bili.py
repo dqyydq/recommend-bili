@@ -207,6 +207,7 @@ async def fetch_history(cookies: dict[str, str], days: int = 90,
     cutoff = time.time() - days * 86400
     history: list[dict] = []
     max_id = 0
+    print(f"[history] 开始拉取观看历史, cutoff={cutoff}, days={days}")
     async with _client(cookies) as client:
         while True:
             url = f"{BILI_API}/x/web-interface/history/cursor"
@@ -223,10 +224,15 @@ async def fetch_history(cookies: dict[str, str], days: int = 90,
             except Exception as e:
                 print(f"[history] 请求失败 (max_id={max_id}): {e}")
                 break
-            if data.get("code") != 0:
-                break
+            code = data.get("code")
             items = (data.get("data") or {}).get("list", []) or []
+            has_more = (data.get("data") or {}).get("has_more", False)
+            print(f"[history] page max_id={max_id} code={code} items={len(items)} has_more={has_more}")
+            if code != 0:
+                print(f"[history] API code={code} msg={data.get('message')} — 停止拉取")
+                break
             if not items:
+                print(f"[history] 无更多记录 — 停止拉取")
                 break
             for item in items:
                 history.append({
@@ -237,7 +243,8 @@ async def fetch_history(cookies: dict[str, str], days: int = 90,
             if on_progress:
                 await on_progress(len(history))
             max_id = items[-1].get("view_at", 0)
-            if len(items) < 20:
+            if not has_more:
                 break
             await asyncio.sleep(0.3)
+    print(f"[history] 结束: 共 {len(history)} 条记录")
     return history
