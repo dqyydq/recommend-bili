@@ -262,8 +262,13 @@ async def api_clean_scan(request: Request, session: dict = Depends(get_session))
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
+class RemoveItem(BaseModel):
+    bvid: str
+    folder_id: int
+
+
 class RemoveRequest(BaseModel):
-    bvids: list[str]
+    items: list[RemoveItem]
 
 
 @app.post("/api/clean/remove")
@@ -281,17 +286,24 @@ async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_sessi
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://space.bilibili.com/",
         }) as client:
-            for bvid in req.bvids:
+            for item in req.items:
                 resp = await client.post(
                     "https://api.bilibili.com/x/v3/fav/resource/deal",
-                    data={"rid": bvid, "type": "2", "add_media_ids": "", "del_media_ids": "1", "csrf": csrf},
+                    data={
+                        "rid": item.bvid,
+                        "type": "2",
+                        "add_media_ids": "",
+                        "del_media_ids": str(item.folder_id),
+                        "csrf": csrf,
+                    },
                     timeout=30,
                 )
                 data = resp.json()
+                print(f"[clean/remove] {item.bvid} folder={item.folder_id} => code={data.get('code')} msg={data.get('message')}")
                 if data.get("code") == 0:
                     removed += 1
                 await asyncio.sleep(0.5)
-        return {"removed": removed, "total": len(req.bvids)}
+        return {"removed": removed, "total": len(req.items)}
     except Exception as e:
         return {"error": str(e)}
 

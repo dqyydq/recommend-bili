@@ -84,7 +84,7 @@ function renderCleanList(items, el) {
   </div>`;
   for (const item of items) {
     html += `<label class="result-card" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-      <input type="checkbox" class="clean-cb" value="${item.bvid}" style="width:16px;height:16px;" />
+      <input type="checkbox" class="clean-cb" data-bvid="${item.bvid}" data-fid="${item.folder_id || ''}" style="width:16px;height:16px;" />
       <div>
         <a href="${item.link}" target="_blank">${item.title}</a>
         <span class="meta"> — ${item.upper} | ${item.folder_name}</span>
@@ -101,15 +101,15 @@ function renderCleanList(items, el) {
 
   document.getElementById("removeBtn").addEventListener("click", async () => {
     const cbs = el.querySelectorAll(".clean-cb:checked");
-    const bvids = [...cbs].map(c => c.value);
-    if (!bvids.length) return alert("请勾选要移除的视频");
-    if (!confirm(`确认移除 ${bvids.length} 个失效视频？`)) return;
+    const items = [...cbs].map(c => ({ bvid: c.dataset.bvid, folder_id: parseInt(c.dataset.fid) || 0 }));
+    if (!items.length) return alert("请勾选要移除的视频");
+    if (!confirm(`确认移除 ${items.length} 个失效视频？`)) return;
 
     const resp = await fetch(REMOVE_URL, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bvids }),
+      body: JSON.stringify({ items }),
     });
     const data = await resp.json();
     if (data.error) { alert(data.error); return; }
