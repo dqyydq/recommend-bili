@@ -1,3 +1,5 @@
+import json
+import os
 import secrets
 import time
 import urllib.parse
@@ -16,6 +18,58 @@ sessions: dict[str, dict] = {}
 qrcode_pool: dict[str, dict] = {}
 
 SID_LEN = 32
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
+SETTINGS_DIR = os.path.join(DATA_DIR, "settings")
+
+
+def _save_sessions():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(sessions, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[auth] 保存 sessions 失败: {e}")
+
+
+def _load_sessions():
+    if not os.path.isfile(SESSIONS_FILE):
+        return
+    try:
+        with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for sid, s in data.items():
+            sessions[sid] = s
+        print(f"[auth] 已恢复 {len(sessions)} 个 session")
+    except Exception as e:
+        print(f"[auth] 加载 sessions 失败: {e}")
+
+
+def _load_user_settings(uid: str) -> dict:
+    """返回 {api_key, model}，文件不存在返回默认值"""
+    path = os.path.join(SETTINGS_DIR, f"{uid}.json")
+    if not os.path.isfile(path):
+        return {"api_key": "", "model": "deepseek-v4-flash"}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"api_key": "", "model": "deepseek-v4-flash"}
+
+
+def _save_user_settings(uid: str, api_key: str, model: str):
+    os.makedirs(SETTINGS_DIR, exist_ok=True)
+    path = os.path.join(SETTINGS_DIR, f"{uid}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"api_key": api_key, "model": model}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[auth] 保存 settings 失败: {e}")
+
+
+# 启动时恢复 session
+_load_sessions()
 
 
 async def generate_qrcode() -> dict:
@@ -91,15 +145,20 @@ async def poll_qrcode(key: str) -> dict:
             from bili import get_user_info
             user_info = await get_user_info(uid)
 
+            settings = _load_user_settings(uid)
+
             sessions[session_id] = {
                 "bili_cookies": bili_cookies,
-                "deepseek_key": "",
+                "deepseek_key": settings["api_key"],
+                "model": settings.get("model", "deepseek-v4-flash"),
                 "uid": uid,
                 "nickname": user_info.get("nickname", ""),
                 "avatar": user_info.get("avatar", ""),
                 "folders": [],
                 "created_at": time.time(),
             }
+
+            _save_sessions()
 
             qrcode_pool[key]["status"] = "confirmed"
             qrcode_pool[key]["session_id"] = session_id
@@ -115,3 +174,11 @@ def get_session(request: Request) -> dict:
     if not session_id or session_id not in sessions:
         raise HTTPException(401, detail="未登录")
     return sessions[session_id]
+
+
+def on_session_updated(session: dict):
+    """session 变更后调用（settings/key, settings/model 路由使用）"""
+    _save_sessions()
+    uid = session.get("uid", "")
+    if uid:
+        _save_user_settings(uid, session.get("deepseek_key", ""), session.get("model", "deepseek-v4-flash"))
