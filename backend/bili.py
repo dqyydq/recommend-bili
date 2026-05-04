@@ -212,11 +212,10 @@ async def fetch_history(cookies: dict[str, str], days: int = 90,
         while True:
             url = f"{BILI_API}/x/web-interface/history/cursor"
             params: dict = {
+                "max": str(max_id),
                 "ps": 20,
                 "type": "archive",
             }
-            if max_id:
-                params["max"] = str(max_id)
             try:
                 resp = await client.get(url, params=params, timeout=30)
                 resp.raise_for_status()
