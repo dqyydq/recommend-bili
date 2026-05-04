@@ -104,7 +104,7 @@ async def fetch_fav_items(folder_id: int, cookies: dict[str, str] | None = None,
 async def fetch_all_items(uid: str, cookies: dict[str, str] | None = None,
                           folders: list[dict] | None = None,
                           on_progress=None) -> list[dict]:
-    """串行抓取所有收藏夹，文件夹间隔 0.5s，分页间隔 0.3s"""
+    """串行抓取所有收藏夹，文件夹间隔 0.8s，412自动重试"""
     if folders is None:
         folders = await fetch_fav_folders(uid, cookies)
     valid = [(f.get("media_id") or f.get("id"), f)
@@ -115,11 +115,23 @@ async def fetch_all_items(uid: str, cookies: dict[str, str] | None = None,
     all_items: list[dict] = []
     for i, (fid, folder) in enumerate(valid):
         fname = folder.get("title", "收藏夹")
-        try:
-            items = await fetch_fav_items(fid, cookies)
-        except Exception as e:
-            print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 抓取异常: {e}")
-            continue
+        items: list[dict] = []
+        for attempt in range(3):
+            try:
+                items = await fetch_fav_items(fid, cookies)
+                break
+            except Exception as e:
+                err = str(e)
+                if "412" in err and attempt < 2:
+                    delay = (attempt + 1) * 3
+                    print(f"[fetch_all] '{fname}' 412限流, {delay}s 后重试 (第{attempt+1}次)")
+                    await asyncio.sleep(delay)
+                else:
+                    print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 抓取异常: {e}")
+                    items = []
+                    break
+        if not items and attempt == 2:
+            print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 重试3次仍失败，跳过")
         if not items:
             print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 返回 0 条")
         for item in items:
@@ -128,9 +140,9 @@ async def fetch_all_items(uid: str, cookies: dict[str, str] | None = None,
         all_items.extend(items)
         if on_progress:
             await on_progress(fname, len(items), len(all_items))
-        # 文件夹间间隔，避免连续请求触发风控
+        # 文件夹间间隔
         if i < len(valid) - 1:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.8)
 
     print(f"[fetch_all] 完成: {len(all_items)} 条, {len(folders)} 个收藏夹")
     return all_items
