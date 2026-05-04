@@ -1,9 +1,10 @@
-const ANALYZE_URL = "http://localhost:8000/api/analyze";
-const SCAN_URL = "http://localhost:8000/api/clean/scan";
-const REMOVE_URL = "http://localhost:8000/api/clean/remove";
-const SAVE_URL = "http://localhost:8000/api/classify/save";
-const HISTORY_URL = "http://localhost:8000/api/classify/history";
-const LOAD_URL = "http://localhost:8000/api/classify/load";
+const BASE = "http://localhost:8000/api";
+const ANALYZE_URL = `${BASE}/analyze`;
+const SCAN_URL = `${BASE}/clean/scan`;
+const REMOVE_URL = `${BASE}/clean/remove`;
+const SAVE_URL = `${BASE}/classify/save`;
+const HISTORY_URL = `${BASE}/classify/history`;
+const LOAD_URL = `${BASE}/classify/load`;
 
 export async function renderOrganizeModule(container) {
   container.innerHTML = `
@@ -29,8 +30,14 @@ export async function renderOrganizeModule(container) {
   renderTab("clean", content);
 }
 
+let _activeES = null;
+function trackES(es) { _activeES = es; }
+function untrackES() { _activeES = null; }
+
 function renderTab(name, content) {
+  if (_activeES) { _activeES.close(); _activeES = null; }
   content.innerHTML = "";
+  classifyData = null;
   if (name === "clean") renderCleanTab(content);
   if (name === "reclassify") renderReclassifyTab(content);
   if (name === "history") renderHistoryTab(content);
@@ -64,6 +71,7 @@ function renderCleanTab(el) {
     progressDiv.style.display = "block";
 
     const es = new EventSource(SCAN_URL, { withCredentials: true });
+    trackES(es);
     let invalidItems = [];
 
     es.addEventListener("progress", (e) => {
@@ -116,7 +124,7 @@ function renderCleanList(items, el) {
 
   document.getElementById("removeBtn").addEventListener("click", async () => {
     const cbs = el.querySelectorAll(".clean-cb:checked");
-    const items = [...cbs].map(c => ({ bvid: c.dataset.bvid, folder_id: parseInt(c.dataset.fid) || 0, media_id: parseInt(c.dataset.mid) || 0, id: parseInt(c.dataset.mid) || 0 }));
+    const items = [...cbs].map(c => ({ bvid: c.dataset.bvid, folder_id: parseInt(c.dataset.fid) || 0, media_id: parseInt(c.dataset.mid) || 0 }));
     if (!items.length) return alert("请勾选要移除的视频");
     if (!confirm(`确认移除 ${items.length} 个失效视频？`)) return;
 
@@ -155,6 +163,7 @@ function renderReclassifyTab(el) {
     progress.innerHTML = `<span style="color:#999;">正在抓取和分析…</span>`;
 
     const es = new EventSource(ANALYZE_URL, { withCredentials: true });
+    trackES(es);
 
     es.addEventListener("progress", (e) => {
       const d = JSON.parse(e.data);

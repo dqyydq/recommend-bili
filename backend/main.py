@@ -3,14 +3,13 @@ import json
 import os
 import time
 
-import httpx
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool
-from bili import fetch_fav_folders, fetch_fav_items, search_all, add_favorite, fetch_history, _client, BILI_HEADERS
+from bili import fetch_fav_folders, fetch_fav_items, search_all, add_favorite, fetch_history, _client
 from classifier import classify_favorites
 from clean import scan_invalid
 from storage import save as storage_save, list_history as storage_list, load as storage_load
@@ -281,7 +280,6 @@ class RemoveItem(BaseModel):
     bvid: str
     folder_id: int
     media_id: int = 0
-    id: int = 0
 
 
 class RemoveRequest(BaseModel):

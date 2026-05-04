@@ -3,11 +3,14 @@ import os
 from datetime import datetime
 
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "classifications")
-os.makedirs(BASE_DIR, exist_ok=True)
+
+
+def _ensure_dir():
+    os.makedirs(BASE_DIR, exist_ok=True)
 
 
 def save(data: dict) -> str:
-    """保存分类结果，返回文件名"""
+    _ensure_dir()
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     filename = f"{ts}.json"
     payload = {
@@ -23,7 +26,6 @@ def save(data: dict) -> str:
 
 
 def list_history() -> list[dict]:
-    """列出所有分类历史记录"""
     if not os.path.isdir(BASE_DIR):
         return []
     files = sorted(os.listdir(BASE_DIR), reverse=True)
@@ -47,7 +49,6 @@ def list_history() -> list[dict]:
 
 
 def load(filename: str) -> dict | None:
-    """加载某次分类结果"""
     if ".." in filename or "/" in filename:
         return None
     path = os.path.join(BASE_DIR, filename)
