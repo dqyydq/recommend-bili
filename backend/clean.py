@@ -24,8 +24,11 @@ async def _check_bvid(bvid: str, client: httpx.AsyncClient) -> bool:
         return True
 
 
-async def scan_invalid(cookies: dict, fetch_fav_folders, fetch_fav_items, uid: str) -> list[dict]:
-    """全量抓取 → view API 逐条验证失效"""
+async def scan_invalid(
+    cookies: dict, fetch_fav_folders, fetch_fav_items, uid: str,
+    on_progress=None,
+) -> list[dict]:
+    """全量抓取 → view API 逐条验证失效，on_progress(total, checked, invalid_count) 回调"""
     folders = await fetch_fav_folders(uid, cookies)
 
     all_items: list[dict] = []
@@ -43,7 +46,8 @@ async def scan_invalid(cookies: dict, fetch_fav_folders, fetch_fav_items, uid: s
         all_items.extend(items)
         await asyncio.sleep(0.3)
 
-    print(f"[clean] collected {len(all_items)} items, verifying...")
+    total = len(all_items)
+    print(f"[clean] collected {total} items, verifying...")
 
     jar = httpx.Cookies()
     jar.set("buvid3", "3787611E-2E66-0B20-D062-B6ACF0A5987B22749infoc", domain=".bilibili.com")
@@ -62,10 +66,12 @@ async def scan_invalid(cookies: dict, fetch_fav_folders, fetch_fav_items, uid: s
                 if await _check_bvid(item["bvid"], client):
                     invalid.append(item)
             checked += 1
-            if checked % 50 == 0:
-                print(f"[clean] verified {checked}/{len(all_items)}, found {len(invalid)} invalid")
+            if on_progress and (checked % 20 == 0 or checked == total):
+                await on_progress(total, checked, len(invalid))
+            elif checked % 50 == 0:
+                print(f"[clean] verified {checked}/{total}, found {len(invalid)} invalid")
 
     await asyncio.gather(*[verify(item) for item in all_items])
 
-    print(f"[clean] done: {len(all_items)} checked, {len(invalid)} invalid")
+    print(f"[clean] done: {total} checked, {len(invalid)} invalid")
     return invalid

@@ -250,10 +250,25 @@ async def api_clean_scan(request: Request, session: dict = Depends(get_session))
 
     async def event_stream():
         try:
-            yield f"event: progress\ndata: {json.dumps({'phase': 'scanning', 'count': 0})}\n\n"
-            invalid = await scan_invalid(cookies, fetch_fav_folders, fetch_fav_items, uid)
-            yield f"event: progress\ndata: {json.dumps({'phase': 'done', 'count': len(invalid)})}\n\n"
-            yield f"event: result\ndata: {json.dumps({'invalid': invalid, 'total': len(invalid)})}\n\n"
+            queue: asyncio.Queue = asyncio.Queue()
+
+            async def on_progress(total: int, checked: int, invalid_count: int):
+                await queue.put({"checked": checked, "total": total, "invalid": invalid_count})
+
+            async def do_scan():
+                result = await scan_invalid(cookies, fetch_fav_folders, fetch_fav_items, uid, on_progress=on_progress)
+                await queue.put({"done": True, "result": result})
+
+            asyncio.create_task(do_scan())
+
+            while True:
+                msg = await queue.get()
+                if msg.get("done"):
+                    result = msg["result"]
+                    yield f"event: result\ndata: {json.dumps({'invalid': result, 'total': len(result)})}\n\n"
+                    break
+                yield f"event: progress\ndata: {json.dumps(msg)}\n\n"
+
         except Exception as e:
             import traceback
             traceback.print_exc()

@@ -42,6 +42,14 @@ function renderCleanTab(el) {
   el.innerHTML = `
     <button id="cleanScanBtn" class="btn">扫描失效视频</button>
     <span id="cleanStatus" style="font-size:13px;color:#999;margin-left:10px;"></span>
+    <div id="cleanProgress" style="display:none;margin-top:12px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+        <div style="flex:1;height:6px;background:#eee;border-radius:3px;overflow:hidden;">
+          <div id="cleanProgressFill" style="height:100%;width:0%;background:#FB7299;transition:width 0.3s;"></div>
+        </div>
+        <span id="cleanProgressText" style="font-size:12px;color:#999;"></span>
+      </div>
+    </div>
     <div id="cleanResult" style="margin-top:16px;"></div>
   `;
 
@@ -49,14 +57,21 @@ function renderCleanTab(el) {
     const btn = document.getElementById("cleanScanBtn");
     const status = document.getElementById("cleanStatus");
     btn.disabled = true;
-    status.textContent = "扫描中…";
+    status.textContent = "收集收藏夹…";
+    const progressDiv = document.getElementById("cleanProgress");
+    const progressFill = document.getElementById("cleanProgressFill");
+    const progressText = document.getElementById("cleanProgressText");
+    progressDiv.style.display = "block";
 
     const es = new EventSource(SCAN_URL, { withCredentials: true });
     let invalidItems = [];
 
     es.addEventListener("progress", (e) => {
       const d = JSON.parse(e.data);
-      status.textContent = "正在扫描…";
+      const pct = Math.round((d.checked / d.total) * 100);
+      progressFill.style.width = pct + "%";
+      progressText.textContent = `${d.checked}/${d.total}`;
+      status.textContent = `验证中… 已发现 ${d.invalid} 个失效`;
     });
 
     es.addEventListener("result", (e) => {
