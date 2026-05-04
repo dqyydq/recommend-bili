@@ -293,29 +293,27 @@ async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_sessi
         cookies = session.get("bili_cookies", {})
         csrf = cookies.get("bili_jct", "")
 
+        # 构造 resources: "aid:type,aid:type" 格式
+        resources = ",".join(f"{item.media_id}:2" for item in req.items if item.media_id)
+
         removed = 0
         async with _client(cookies) as client:
-            for item in req.items:
-                resp = await client.post(
-                    "https://api.bilibili.com/x/v3/fav/resource/deal",
-                    data={
-                        "rid": item.bvid,
-                        "type": "2",
-                        "add_media_ids": "",
-                        "del_media_ids": str(item.folder_id),
-                        "csrf": csrf,
-                    },
-                    timeout=30,
-                )
-                try:
-                    data = resp.json()
-                except Exception:
-                    print(f"[clean/remove] {item.bvid} empty response, text={resp.text[:200]}")
-                    data = {}
-                print(f"[clean/remove] {item.bvid} folder={item.folder_id} => code={data.get('code')} msg={data.get('message')}")
-                if data.get("code") == 0:
-                    removed += 1
-                await asyncio.sleep(0.5)
+            resp = await client.post(
+                "https://api.bilibili.com/x/v3/fav/resource/batch-del",
+                data={
+                    "resources": resources,
+                    "csrf": csrf,
+                },
+                timeout=30,
+            )
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            print(f"[clean/remove] resources={resources[:100]} => code={data.get('code')} msg={data.get('message')}")
+            if data.get("code") == 0:
+                removed = len(req.items)
+
         return {"removed": removed, "total": len(req.items)}
     except Exception as e:
         return {"error": str(e)}
