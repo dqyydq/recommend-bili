@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool
-from bili import fetch_fav_folders, fetch_fav_items, search_all, add_favorite, fetch_history
+from bili import fetch_fav_folders, fetch_fav_items, search_all, add_favorite, fetch_history, _client, BILI_HEADERS
 from classifier import classify_favorites
 from clean import scan_invalid
 from storage import save as storage_save, list_history as storage_list, load as storage_load
@@ -292,22 +292,15 @@ async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_sessi
     try:
         cookies = session.get("bili_cookies", {})
         csrf = cookies.get("bili_jct", "")
-        jar = httpx.Cookies()
-        jar.set("buvid3", "3787611E-2E66-0B20-D062-B6ACF0A5987B22749infoc", domain=".bilibili.com")
-        for k, v in cookies.items():
-            jar.set(k, v, domain=".bilibili.com")
 
         removed = 0
-        async with httpx.AsyncClient(cookies=jar, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://space.bilibili.com/",
-        }) as client:
+        async with _client(cookies) as client:
             for item in req.items:
-                rid = str(item.media_id) if item.media_id else item.bvid
                 resp = await client.post(
                     "https://api.bilibili.com/x/v3/fav/resource/deal",
                     data={
-                        "resources": f'[{{"id":{rid},"type":2}}]',
+                        "rid": item.bvid,
+                        "type": "2",
                         "add_media_ids": "",
                         "del_media_ids": str(item.folder_id),
                         "csrf": csrf,
