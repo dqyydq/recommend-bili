@@ -280,6 +280,7 @@ async def api_clean_scan(request: Request, session: dict = Depends(get_session))
 class RemoveItem(BaseModel):
     bvid: str
     folder_id: int
+    media_id: int = 0
 
 
 class RemoveRequest(BaseModel):
@@ -302,11 +303,11 @@ async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_sessi
             "Referer": "https://space.bilibili.com/",
         }) as client:
             for item in req.items:
+                rid = str(item.media_id) if item.media_id else item.bvid
                 resp = await client.post(
                     "https://api.bilibili.com/x/v3/fav/resource/deal",
                     data={
-                        "rid": item.bvid,
-                        "type": "2",
+                        "resources": f'[{{"id":{rid},"type":2}}]',
                         "add_media_ids": "",
                         "del_media_ids": str(item.folder_id),
                         "csrf": csrf,

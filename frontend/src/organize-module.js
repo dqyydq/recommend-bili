@@ -99,7 +99,7 @@ function renderCleanList(items, el) {
   </div>`;
   for (const item of items) {
     html += `<label class="result-card" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-      <input type="checkbox" class="clean-cb" data-bvid="${item.bvid}" data-fid="${item.folder_id || ''}" style="width:16px;height:16px;" />
+      <input type="checkbox" class="clean-cb" data-bvid="${item.bvid}" data-fid="${item.folder_id || ''}" data-mid="${item.media_id || 0}" style="width:16px;height:16px;" />
       <div>
         <a href="${item.link}" target="_blank">${item.title}</a>
         <span class="meta"> — ${item.upper} | ${item.folder_name}</span>
@@ -116,7 +116,7 @@ function renderCleanList(items, el) {
 
   document.getElementById("removeBtn").addEventListener("click", async () => {
     const cbs = el.querySelectorAll(".clean-cb:checked");
-    const items = [...cbs].map(c => ({ bvid: c.dataset.bvid, folder_id: parseInt(c.dataset.fid) || 0 }));
+    const items = [...cbs].map(c => ({ bvid: c.dataset.bvid, folder_id: parseInt(c.dataset.fid) || 0, media_id: parseInt(c.dataset.mid) || 0 }));
     if (!items.length) return alert("请勾选要移除的视频");
     if (!confirm(`确认移除 ${items.length} 个失效视频？`)) return;
 
