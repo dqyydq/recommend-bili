@@ -9,7 +9,6 @@ from sklearn.metrics import silhouette_score
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/embeddings")
 OLLAMA_MODEL = "nomic-embed-text"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 
 async def get_embeddings(texts: list[str]) -> list[list[float]]:
@@ -68,7 +67,7 @@ def optimal_k(embeddings: list[list[float]]) -> int:
     return max(2, min(best_k, max_k))
 
 
-async def name_cluster(titles: list[str], api_key: str) -> str:
+async def name_cluster(titles: list[str], api_key: str, model: str = "deepseek-v4-flash") -> str:
     client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
     prompt = (
         "请根据以下视频标题，给这个分类起一个简洁的中文名字（不超过10个字）：\n"
@@ -76,14 +75,14 @@ async def name_cluster(titles: list[str], api_key: str) -> str:
         + "\n\n只需要返回分类名字，不要任何解释。"
     )
     resp = await client.chat.completions.create(
-        model=DEEPSEEK_MODEL,
+        model=model,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=20,
     )
     return resp.choices[0].message.content.strip()
 
 
-async def classify_favorites(items: list[dict], api_key: str) -> dict:
+async def classify_favorites(items: list[dict], api_key: str, model: str = "deepseek-v4-flash") -> dict:
     if not items:
         return {"categories": [], "total": 0}
 
@@ -101,7 +100,7 @@ async def classify_favorites(items: list[dict], api_key: str) -> dict:
     categories = []
     for cluster_items_list in clusters.values():
         titles = [item["title"] for item in cluster_items_list]
-        name = await name_cluster(titles, api_key)
+        name = await name_cluster(titles, api_key, model=model)
         categories.append({
             "name": name,
             "items": cluster_items_list,

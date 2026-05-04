@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool
+from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool, on_session_updated
 from bili import fetch_fav_folders, fetch_fav_items, fetch_all_items, search_all, add_favorite, fetch_history, _client
 from classifier import classify_favorites
 from clean import scan_invalid
@@ -62,6 +62,7 @@ async def me(request: Request):
         "has_key": bool(s.get("deepseek_key")),
         "nickname": s.get("nickname", ""),
         "avatar": s.get("avatar", ""),
+        "model": s.get("model", "deepseek-v4-flash"),
     }
 
 
@@ -69,9 +70,31 @@ class KeyRequest(BaseModel):
     api_key: str
 
 
+class ModelRequest(BaseModel):
+    model: str
+
+
+@app.get("/api/settings")
+async def api_settings(session: dict = Depends(get_session)):
+    key = session.get("deepseek_key", "")
+    masked = key if len(key) <= 8 else key[:4] + "*" * (len(key) - 8) + key[-4:]
+    return {
+        "api_key": masked,
+        "model": session.get("model", "deepseek-v4-flash"),
+    }
+
+
 @app.post("/api/settings/key")
 async def settings_key(req: KeyRequest, session: dict = Depends(get_session)):
     session["deepseek_key"] = req.api_key
+    on_session_updated(session)
+    return {"success": True}
+
+
+@app.post("/api/settings/model")
+async def settings_model(req: ModelRequest, session: dict = Depends(get_session)):
+    session["model"] = req.model
+    on_session_updated(session)
     return {"success": True}
 
 
@@ -154,7 +177,8 @@ async def api_analyze(request: Request, folder_id: int | None = None, session: d
 
             yield f"event: classifying\ndata: {json.dumps({'total': len(all_items)})}\n\n"
 
-            result = await classify_favorites(all_items, api_key)
+            model = session.get("model", "deepseek-v4-flash")
+            result = await classify_favorites(all_items, api_key, model=model)
             yield f"event: result\ndata: {json.dumps(result)}\n\n"
 
         except Exception as e:
