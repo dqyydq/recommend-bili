@@ -45,16 +45,31 @@ function renderTab(name, content) {
 
 /* ========== Tab 1: 清除失效 ========== */
 
+const STATUS_MSGS = [
+  "小管家正在翻看收藏夹… 📂",
+  "逐条检查视频还在不在… 🔍",
+  "遇到失效视频会记下来哦… 📝",
+  "快好了，再等一下下… 🍬",
+  "B站有时候有点慢，耐心等等~ ⏳",
+];
+
 function renderCleanTab(el) {
   el.innerHTML = `
     <button id="cleanScanBtn" class="btn">扫描失效视频</button>
     <span id="cleanStatus" style="font-size:13px;color:#999;margin-left:10px;"></span>
-    <div id="cleanProgress" style="display:none;margin-top:12px;">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-        <div style="flex:1;height:6px;background:#eee;border-radius:3px;overflow:hidden;">
-          <div id="cleanProgressFill" style="height:100%;width:0%;background:#FB7299;transition:width 0.3s;"></div>
+    <div id="cleanProgress" style="display:none;margin-top:16px;">
+      <div class="bili-progress-area">
+        <div class="header-row">
+          <span class="icon" id="cleanIcon">🔍</span>
+          <span id="cleanPhaseText" style="font-size:14px;color:#333;"></span>
         </div>
-        <span id="cleanProgressText" style="font-size:12px;color:#999;"></span>
+        <div class="bar-row">
+          <div class="bili-progress-bar">
+            <div class="fill" id="cleanProgressFill"></div>
+          </div>
+          <span class="pct" id="cleanPct">0%</span>
+        </div>
+        <div class="info-row" id="cleanInfo"></div>
       </div>
     </div>
     <div id="cleanResult" style="margin-top:16px;"></div>
@@ -64,35 +79,82 @@ function renderCleanTab(el) {
     const btn = document.getElementById("cleanScanBtn");
     const status = document.getElementById("cleanStatus");
     btn.disabled = true;
-    status.textContent = "收集收藏夹…";
+    status.textContent = "";
     const progressDiv = document.getElementById("cleanProgress");
     const progressFill = document.getElementById("cleanProgressFill");
-    const progressText = document.getElementById("cleanProgressText");
+    const progressPct = document.getElementById("cleanPct");
+    const progressInfo = document.getElementById("cleanInfo");
+    const phaseText = document.getElementById("cleanPhaseText");
+    const icon = document.getElementById("cleanIcon");
     progressDiv.style.display = "block";
+
+    // 阶段1：收集收藏夹 — 弹跳动画
+    progressFill.style.width = "0%";
+    progressPct.textContent = "";
+    phaseText.textContent = "正在收集收藏夹…";
+    icon.textContent = "📂";
+
+    let msgIdx = 0;
+    const msgTimer = setInterval(() => {
+      if (msgIdx < STATUS_MSGS.length - 1) {
+        document.getElementById("cleanInfo").textContent = STATUS_MSGS[msgIdx];
+        document.getElementById("cleanIcon").textContent = ["📂","🔍","📝","🍬","⏳"][msgIdx];
+        msgIdx++;
+      }
+    }, 4000);
 
     const es = new EventSource(SCAN_URL, { withCredentials: true });
     trackES(es);
     let invalidItems = [];
 
     es.addEventListener("progress", (e) => {
+      clearInterval(msgTimer);
       const d = JSON.parse(e.data);
       const pct = Math.round((d.checked / d.total) * 100);
       progressFill.style.width = pct + "%";
-      progressText.textContent = `${d.checked}/${d.total}`;
-      status.textContent = `验证中… 已发现 ${d.invalid} 个失效`;
+      progressPct.textContent = pct + "%";
+      phaseText.textContent = "正在逐条校验视频有效性…";
+      icon.textContent = "🔍";
+      progressInfo.textContent = `已检查 ${d.checked} / ${d.total} 条，发现 ${d.invalid} 个失效视频`;
+      status.textContent = "";
     });
 
     es.addEventListener("result", (e) => {
       es.close();
+      clearInterval(msgTimer);
       btn.disabled = false;
       const d = JSON.parse(e.data);
       invalidItems = d.invalid || [];
-      status.textContent = `发现 ${invalidItems.length} 个失效视频`;
-      renderCleanList(invalidItems, document.getElementById("cleanResult"));
+
+      // 完成动画
+      progressFill.style.width = "100%";
+      progressPct.textContent = "✓";
+      phaseText.textContent = "";
+      icon.textContent = "🎉";
+      icon.style.animation = "bili-pop 0.5s ease-out";
+      progressInfo.textContent = invalidItems.length === 0
+        ? "太棒了！没有发现失效视频 ✨"
+        : `扫描完成，发现 ${invalidItems.length} 个失效视频`;
+
+      status.textContent = "";
+      setTimeout(() => {
+        progressDiv.style.display = "none";
+        renderCleanList(invalidItems, document.getElementById("cleanResult"));
+      }, 800);
     });
 
-    es.addEventListener("error", () => { es.close(); btn.disabled = false; status.textContent = "扫描失败"; });
-    es.onerror = () => { es.close(); btn.disabled = false; status.textContent = "连接中断"; };
+    es.addEventListener("error", () => {
+      es.close(); clearInterval(msgTimer);
+      btn.disabled = false;
+      phaseText.textContent = "扫描失败 😢";
+      progressInfo.textContent = "请检查网络后重试";
+    });
+    es.onerror = () => {
+      es.close(); clearInterval(msgTimer);
+      btn.disabled = false;
+      phaseText.textContent = "连接中断 😢";
+      progressInfo.textContent = "请检查网络后重试";
+    };
   });
 }
 

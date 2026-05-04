@@ -13,13 +13,19 @@ export async function renderClassifyModule(container) {
         <button id="cancelBtn" class="btn btn-secondary" style="display:none;">取消</button>
       </div>
       <div id="progressArea" style="display:none;margin-bottom:16px;">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-          <div id="progressBar" style="flex:1;height:6px;background:#eee;border-radius:3px;overflow:hidden;">
-            <div id="progressFill" style="height:100%;width:0%;background:#FB7299;transition:width 0.3s;"></div>
+        <div class="bili-progress-area">
+          <div class="header-row">
+            <span class="icon" id="progressIcon">📂</span>
+            <span id="progressPhase" style="font-size:14px;color:#333;">正在收集收藏夹…</span>
           </div>
-          <span id="progressPercent" style="font-size:13px;color:#999;">0%</span>
+          <div class="bar-row">
+            <div class="bili-progress-bar">
+              <div class="fill" id="progressFill"></div>
+            </div>
+            <span class="pct" id="progressPct">0%</span>
+          </div>
+          <div class="info-row" id="progressInfo"></div>
         </div>
-        <span id="progressText" style="font-size:13px;color:#666;"></span>
       </div>
       <div id="analyzeResult"></div>
     </div>
@@ -32,8 +38,10 @@ export async function renderClassifyModule(container) {
   const cancelBtn = document.getElementById("cancelBtn");
   const progressArea = document.getElementById("progressArea");
   const progressFill = document.getElementById("progressFill");
-  const progressPercent = document.getElementById("progressPercent");
-  const progressText = document.getElementById("progressText");
+  const progressPct = document.getElementById("progressPct");
+  const progressPhase = document.getElementById("progressPhase");
+  const progressIcon = document.getElementById("progressIcon");
+  const progressInfo = document.getElementById("progressInfo");
   const resultEl = document.getElementById("analyzeResult");
 
   // 加载收藏夹列表
@@ -69,8 +77,10 @@ export async function renderClassifyModule(container) {
     cancelBtn.style.display = "inline-block";
     progressArea.style.display = "block";
     progressFill.style.width = "0%";
-    progressPercent.textContent = "0%";
-    progressText.textContent = "正在抓取收藏夹…";
+    progressPct.textContent = "";
+    progressPhase.textContent = "正在抓取收藏夹…";
+    progressIcon.textContent = "📂";
+    progressInfo.textContent = "";
 
     const fid = folderSelect.value;
     const url = fid ? `${SSE_BASE}?folder_id=${fid}` : SSE_BASE;
@@ -82,15 +92,19 @@ export async function renderClassifyModule(container) {
       const d = JSON.parse(e.data);
       const pct = Math.min(99, Math.round((d.total_collected / estimatedTotal) * 100));
       progressFill.style.width = pct + "%";
-      progressPercent.textContent = pct + "%";
-      progressText.textContent = `已抓取 ${d.total_collected} 条（${d.folder_name}：${d.folder_count} 条）`;
+      progressPct.textContent = pct + "%";
+      progressPhase.textContent = "正在抓取收藏夹…";
+      progressIcon.textContent = "📂";
+      progressInfo.textContent = `已收集 ${d.total_collected} 条（${d.folder_name} 刚完成 ${d.folder_count} 条）`;
     });
 
     es.addEventListener("classifying", (e) => {
       const d = JSON.parse(e.data);
       progressFill.style.width = "100%";
-      progressPercent.textContent = "100%";
-      progressText.textContent = `抓取完成，共 ${d.total} 条。正在 AI 分析分类…`;
+      progressPct.textContent = "100%";
+      progressPhase.textContent = "AI 正在分析分类…";
+      progressIcon.textContent = "🤖";
+      progressInfo.textContent = `抓取完成，共 ${d.total} 条，正在智能命名…`;
     });
 
     es.addEventListener("result", (e) => {

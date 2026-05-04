@@ -17,13 +17,19 @@ export async function renderDustModule(container) {
         <button id="dustCancelBtn" class="btn btn-secondary" style="display:none;">取消</button>
       </div>
       <div id="dustProgressArea" style="display:none;margin-bottom:16px;">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-          <div id="dustProgressBar" style="flex:1;height:6px;background:#eee;border-radius:3px;overflow:hidden;">
-            <div id="dustProgressFill" style="height:100%;width:0%;background:#FB7299;transition:width 0.3s;"></div>
+        <div class="bili-progress-area">
+          <div class="header-row">
+            <span class="icon" id="dustIcon">📂</span>
+            <span id="dustPhase" style="font-size:14px;color:#333;">正在收集收藏夹…</span>
           </div>
-          <span id="dustProgressPercent" style="font-size:13px;color:#999;">0%</span>
+          <div class="bar-row">
+            <div class="bili-progress-bar">
+              <div class="fill" id="dustProgressFill"></div>
+            </div>
+            <span class="pct" id="dustPct">0%</span>
+          </div>
+          <div class="info-row" id="dustInfo"></div>
         </div>
-        <span id="dustProgressText" style="font-size:13px;color:#666;"></span>
       </div>
       <div id="dustResult"></div>
     </div>
@@ -35,8 +41,10 @@ export async function renderDustModule(container) {
   const cancelBtn = document.getElementById("dustCancelBtn");
   const progressArea = document.getElementById("dustProgressArea");
   const progressFill = document.getElementById("dustProgressFill");
-  const progressPercent = document.getElementById("dustProgressPercent");
-  const progressText = document.getElementById("dustProgressText");
+  const progressPct = document.getElementById("dustPct");
+  const progressPhase = document.getElementById("dustPhase");
+  const progressIcon = document.getElementById("dustIcon");
+  const progressInfo = document.getElementById("dustInfo");
   const resultEl = document.getElementById("dustResult");
 
   btn.addEventListener("click", () => {
@@ -46,8 +54,10 @@ export async function renderDustModule(container) {
     cancelBtn.style.display = "inline-block";
     progressArea.style.display = "block";
     progressFill.style.width = "0%";
-    progressPercent.textContent = "0%";
-    progressText.textContent = "正在抓取收藏夹…";
+    progressPct.textContent = "";
+    progressPhase.textContent = "正在抓取收藏夹…";
+    progressIcon.textContent = "📂";
+    progressInfo.textContent = "小管家正在收集你的收藏数据~";
 
     let favCount = 0;
     let histCount = 0;
@@ -63,14 +73,18 @@ export async function renderDustModule(container) {
         favCount = d.count;
         const pct = Math.min(49, Math.round((favCount / estFav) * 49));
         progressFill.style.width = pct + "%";
-        progressPercent.textContent = pct + "%";
-        progressText.textContent = `已抓取 ${favCount} 条收藏…`;
+        progressPct.textContent = pct + "%";
+        progressPhase.textContent = "正在抓取收藏夹…";
+        progressIcon.textContent = "📂";
+        progressInfo.textContent = `已收集 ${favCount} 条收藏`;
       } else if (d.phase === "history") {
         histCount = d.count;
         const pct = Math.min(99, 50 + Math.round((histCount / estHist) * 49));
         progressFill.style.width = pct + "%";
-        progressPercent.textContent = pct + "%";
-        progressText.textContent = `已拉取 ${histCount} 条观看记录…`;
+        progressPct.textContent = pct + "%";
+        progressPhase.textContent = "正在拉取观看历史…";
+        progressIcon.textContent = "📺";
+        progressInfo.textContent = `已拉取 ${histCount} 条观看记录`;
       }
     });
 
