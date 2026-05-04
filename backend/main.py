@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool
-from bili import fetch_fav_folders, fetch_fav_items, search_all, add_favorite, fetch_history, _client
+from bili import fetch_fav_folders, fetch_fav_items, fetch_all_items, search_all, add_favorite, fetch_history, _client
 from classifier import classify_favorites
 from clean import scan_invalid
 from storage import save as storage_save, list_history as storage_list, load as storage_load
@@ -18,21 +18,6 @@ SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel
 
 app = FastAPI()
 
-
-async def _scrape_all_folders(uid: str, cookies: dict, folders: list[dict] | None = None) -> list[dict]:
-    """遍历所有收藏夹抓取全量视频，返回带 folder_name 的 items 列表"""
-    if folders is None:
-        folders = await fetch_fav_folders(uid, cookies)
-    all_items: list[dict] = []
-    for folder in folders:
-        fid = folder.get("media_id") or folder.get("id")
-        if not fid:
-            continue
-        items = await fetch_fav_items(fid, cookies)
-        for item in items:
-            item["folder_name"] = folder.get("title", "收藏夹")
-        all_items.extend(items)
-    return all_items
 
 app.add_middleware(
     CORSMiddleware,
@@ -126,22 +111,42 @@ async def api_analyze(request: Request, folder_id: int | None = None, session: d
     async def event_stream():
         try:
             if folder_id:
-                folders = [{"id": folder_id, "title": "当前收藏夹"}]
+                items = await fetch_fav_items(folder_id, cookies)
+                all_items = items
+                yield f"event: progress\ndata: {json.dumps({'folder_name': '当前收藏夹', 'folder_count': len(items), 'total_collected': len(all_items)})}\n\n"
             else:
                 folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
                 session["folders"] = folders
-            if not folders:
-                yield f"event: error\ndata: {json.dumps({'error': '未找到收藏夹'})}\n\n"
-                return
+                if not folders:
+                    yield f"event: error\ndata: {json.dumps({'error': '未找到收藏夹'})}\n\n"
+                    return
 
-            all_items: list[dict] = []
-            for folder in folders:
-                fid = folder.get("media_id") or folder.get("id")
-                if not fid:
-                    continue
-                items = await fetch_fav_items(fid, cookies)
-                all_items.extend(items)
-                yield f"event: progress\ndata: {json.dumps({'folder_name': folder.get('title', '收藏夹'), 'folder_count': len(items), 'total_collected': len(all_items)})}\n\n"
+                queue: asyncio.Queue = asyncio.Queue()
+
+                async def on_progress(title: str, count: int, total: int):
+                    await queue.put(
+                        f"event: progress\ndata: {json.dumps({'folder_name': title, 'folder_count': count, 'total_collected': total})}\n\n"
+                    )
+
+                fetch_task = asyncio.create_task(
+                    fetch_all_items(uid, cookies, folders=folders, on_progress=on_progress)
+                )
+
+                while not fetch_task.done():
+                    try:
+                        msg = await asyncio.wait_for(queue.get(), timeout=0.15)
+                        yield msg
+                    except asyncio.TimeoutError:
+                        pass
+
+                # 排空残留的进度事件
+                try:
+                    while True:
+                        yield queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+
+                all_items = fetch_task.result()
 
             if not all_items:
                 yield f"event: error\ndata: {json.dumps({'error': '收藏夹为空'})}\n\n"
@@ -176,7 +181,7 @@ async def api_dust(request: Request, session: dict = Depends(get_session)):
                 yield f"event: error\ndata: {json.dumps({'error': '未找到收藏夹'})}\n\n"
                 return
 
-            all_items = await _scrape_all_folders(uid, cookies, folders=folders)
+            all_items = await fetch_all_items(uid, cookies, folders=folders)
             yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': len(all_items)})}\n\n"
 
             yield f"event: progress\ndata: {json.dumps({'phase': 'history', 'count': 0})}\n\n"
@@ -255,7 +260,7 @@ async def api_clean_scan(request: Request, session: dict = Depends(get_session))
                 await queue.put({"checked": checked, "total": total, "invalid": invalid_count})
 
             async def do_scan():
-                result = await scan_invalid(cookies, fetch_fav_folders, fetch_fav_items, uid, on_progress=on_progress)
+                result = await scan_invalid(cookies, uid, on_progress=on_progress)
                 await queue.put({"done": True, "result": result})
 
             asyncio.create_task(do_scan())
@@ -366,7 +371,7 @@ async def api_search_favorites(q: str = "", session: dict = Depends(get_session)
     try:
         cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
-        all_items = await _scrape_all_folders(uid, cookies)
+        all_items = await fetch_all_items(uid, cookies)
         results = [item for item in all_items
                    if q.lower() in item["title"].lower() or q.lower() in item.get("intro", "").lower()]
         return {"results": results, "total": len(results)}

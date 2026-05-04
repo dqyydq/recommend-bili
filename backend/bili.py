@@ -44,10 +44,13 @@ async def fetch_fav_folders(uid: str, cookies: dict[str, str] | None = None) -> 
         return []
 
 
-async def fetch_fav_items(folder_id: int, cookies: dict[str, str] | None = None) -> list[dict]:
+async def fetch_fav_items(folder_id: int, cookies: dict[str, str] | None = None,
+                       client: httpx.AsyncClient | None = None) -> list[dict]:
     items: list[dict] = []
     page = 1
-    async with _client(cookies) as client:
+
+    async def _do(client: httpx.AsyncClient):
+        nonlocal page
         while True:
             url = f"{BILI_API}/x/v3/fav/resource/list"
             params = {
@@ -77,8 +80,50 @@ async def fetch_fav_items(folder_id: int, cookies: dict[str, str] | None = None)
             if not has_more or not medias:
                 break
             page += 1
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(0.3)
+
+    if client is not None:
+        await _do(client)
+    else:
+        async with _client(cookies) as client:
+            await _do(client)
     return items
+
+
+_FOLDER_SEM = asyncio.Semaphore(5)
+
+
+async def fetch_all_items(uid: str, cookies: dict[str, str] | None = None,
+                          folders: list[dict] | None = None,
+                          on_progress=None) -> list[dict]:
+    """并行抓取所有收藏夹的视频，支持进度回调"""
+    if folders is None:
+        folders = await fetch_fav_folders(uid, cookies)
+    valid = {f.get("media_id") or f.get("id"): f
+             for f in folders if f.get("media_id") or f.get("id")}
+    if not valid:
+        return []
+
+    async def _fetch_one(fid: int):
+        async with _FOLDER_SEM:
+            return await fetch_fav_items(fid, cookies)
+
+    fids = list(valid.keys())
+    results = await asyncio.gather(*[_fetch_one(fid) for fid in fids], return_exceptions=True)
+
+    all_items: list[dict] = []
+    for fid, items in zip(fids, results):
+        if isinstance(items, Exception):
+            continue
+        folder = valid[fid]
+        for item in items:
+            item["folder_name"] = folder.get("title", "收藏夹")
+            item["folder_id"] = fid
+        all_items.extend(items)
+        if on_progress:
+            await on_progress(folder.get("title", ""), len(items), len(all_items))
+
+    return all_items
 
 
 async def search_all(keyword: str, page: int = 1) -> list[dict]:
@@ -177,5 +222,5 @@ async def fetch_history(cookies: dict[str, str], days: int = 90) -> list[dict]:
             max_id = items[-1].get("view_at", 0)
             if len(items) < 20:
                 break
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
     return history
