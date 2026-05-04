@@ -24,17 +24,24 @@ async def scan_invalid(cookies: dict, fetch_fav_folders, fetch_fav_items, uid: s
     folders = await fetch_fav_folders(uid, cookies)
     invalid: list[dict] = []
     total = 0
+    skipped = 0
     seen_attrs: set[int] = set()
     for folder in folders:
         fid = folder.get("media_id") or folder.get("id")
         if not fid:
             continue
-        items = await fetch_fav_items(fid, cookies)
+        try:
+            items = await fetch_fav_items(fid, cookies)
+        except Exception as e:
+            skipped += 1
+            print(f"[clean] skip folder {fid}: {e}")
+            continue
         for item in items:
             total += 1
             seen_attrs.add(item.get("attr", 0))
             if is_invalid(item):
                 item["folder_name"] = folder.get("title", "收藏夹")
                 invalid.append(item)
-    print(f"[clean] scanned {total} items, attrs seen: {sorted(seen_attrs)}")
+        await asyncio.sleep(0.5)
+    print(f"[clean] scanned {total} items from {len(folders)} folders (skipped {skipped}), attrs: {sorted(seen_attrs)}")
     return invalid
