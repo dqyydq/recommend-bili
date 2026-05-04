@@ -313,7 +313,11 @@ async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_sessi
                     },
                     timeout=30,
                 )
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except Exception:
+                    print(f"[clean/remove] {item.bvid} empty response, text={resp.text[:200]}")
+                    data = {}
                 print(f"[clean/remove] {item.bvid} folder={item.folder_id} => code={data.get('code')} msg={data.get('message')}")
                 if data.get("code") == 0:
                     removed += 1
