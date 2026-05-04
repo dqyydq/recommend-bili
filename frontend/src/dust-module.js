@@ -58,10 +58,7 @@ export async function renderDustModule(container) {
     progressIcon.textContent = "📂";
     progressInfo.textContent = "小管家正在收集你的收藏数据~";
 
-    let favCount = 0;
-    let histCount = 0;
-    const estFav = 50;
-    const estHist = 100;
+    let totalItems = 0;
 
     abortCtrl = new AbortController();
     const es = new EventSource(DUST_URL, { withCredentials: true });
@@ -69,28 +66,28 @@ export async function renderDustModule(container) {
     es.addEventListener("progress", (e) => {
       const d = JSON.parse(e.data);
       if (d.phase === "favorites") {
-        favCount = d.count;
-        const pct = Math.min(49, Math.round((favCount / estFav) * 49));
-        progressFill.style.width = pct + "%";
-        progressPct.textContent = pct + "%";
+        totalItems = d.count;
+        // 不显示假百分比，用流光动画表示进行中
+        progressFill.style.width = "100%";
+        progressPct.textContent = "";
         progressPhase.textContent = "正在抓取收藏夹…";
         progressIcon.textContent = "📂";
-        progressInfo.textContent = `已收集 ${favCount} 条收藏`;
-      } else if (d.phase === "history") {
-        histCount = d.count;
-        const pct = Math.min(99, 50 + Math.round((histCount / estHist) * 49));
-        progressFill.style.width = pct + "%";
-        progressPct.textContent = pct + "%";
-        progressPhase.textContent = "正在拉取观看历史…";
-        progressIcon.textContent = "📺";
-        progressInfo.textContent = `已拉取 ${histCount} 条观看记录`;
+        progressInfo.textContent = `已收集 ${totalItems} 条收藏`;
       }
     });
 
     es.addEventListener("result", (e) => {
       es.close();
-      resetUI();
-      renderDustResult(JSON.parse(e.data), resultEl);
+      progressFill.style.width = "100%";
+      progressPct.textContent = "✓";
+      progressPhase.textContent = "";
+      progressIcon.textContent = "🎉";
+      progressIcon.style.animation = "bili-pop 0.5s ease-out";
+      progressInfo.textContent = `收集完成，共 ${totalItems} 条。正在分析…`;
+      setTimeout(() => {
+        resetUI();
+        renderDustResult(JSON.parse(e.data), resultEl);
+      }, 600);
     });
 
     es.addEventListener("error", (e) => {
