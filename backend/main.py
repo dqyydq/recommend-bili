@@ -3,6 +3,7 @@ import json
 import os
 import time
 
+import httpx
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -11,6 +12,8 @@ from pydantic import BaseModel
 from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool
 from bili import fetch_fav_folders, fetch_fav_items, search_all, add_favorite, fetch_history
 from classifier import classify_favorites
+from clean import scan_invalid
+from storage import save as storage_save, list_history as storage_list, load as storage_load
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
 
@@ -232,6 +235,99 @@ async def api_dust(request: Request, session: dict = Depends(get_session)):
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+# ---------- 收藏夹整理 ----------
+
+class SaveRequest(BaseModel):
+    folder_name: str = "全部收藏夹"
+    categories: list[dict]
+
+
+@app.get("/api/clean/scan")
+async def api_clean_scan(request: Request, session: dict = Depends(get_session)):
+    cookies = session.get("bili_cookies", {})
+    uid = session.get("uid", "")
+
+    async def event_stream():
+        try:
+            yield f"event: progress\ndata: {json.dumps({'phase': 'scanning', 'count': 0})}\n\n"
+            invalid = await scan_invalid(cookies, fetch_fav_folders, fetch_fav_items, uid)
+            yield f"event: progress\ndata: {json.dumps({'phase': 'done', 'count': len(invalid)})}\n\n"
+            yield f"event: result\ndata: {json.dumps({'invalid': invalid, 'total': len(invalid)})}\n\n"
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+class RemoveRequest(BaseModel):
+    bvids: list[str]
+
+
+@app.post("/api/clean/remove")
+async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_session)):
+    try:
+        cookies = session.get("bili_cookies", {})
+        csrf = cookies.get("bili_jct", "")
+        jar = httpx.Cookies()
+        jar.set("buvid3", "3787611E-2E66-0B20-D062-B6ACF0A5987B22749infoc", domain=".bilibili.com")
+        for k, v in cookies.items():
+            jar.set(k, v, domain=".bilibili.com")
+
+        removed = 0
+        async with httpx.AsyncClient(cookies=jar, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://space.bilibili.com/",
+        }) as client:
+            for bvid in req.bvids:
+                resp = await client.post(
+                    "https://api.bilibili.com/x/v3/fav/resource/deal",
+                    data={"rid": bvid, "type": "2", "add_media_ids": "", "del_media_ids": "1", "csrf": csrf},
+                    timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") == 0:
+                    removed += 1
+                await asyncio.sleep(0.5)
+        return {"removed": removed, "total": len(req.bvids)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/classify/save")
+async def api_classify_save(req: SaveRequest, session: dict = Depends(get_session)):
+    try:
+        payload = {
+            "folder_name": req.folder_name,
+            "total": sum(len(c.get("items", [])) for c in req.categories),
+            "categories": req.categories,
+        }
+        filename = storage_save(payload)
+        return {"success": True, "filename": filename}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/classify/history")
+async def api_classify_history(session: dict = Depends(get_session)):
+    try:
+        return {"history": storage_list()}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/classify/load")
+async def api_classify_load(file: str, session: dict = Depends(get_session)):
+    try:
+        data = storage_load(file)
+        if data is None:
+            return {"error": "文件不存在"}
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
 
 # ---------- 搜索 ----------
 
