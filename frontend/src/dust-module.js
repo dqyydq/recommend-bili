@@ -1,3 +1,5 @@
+import { escapeAttr, escapeHtml, showInlineMessage } from "./ui.js";
+
 const DUST_URL = "http://localhost:8000/api/dust";
 
 const LABELS = {
@@ -101,14 +103,14 @@ export async function renderDustModule(container) {
           if (d.error) msg = d.error;
         }
       } catch (_) {}
-      resultEl.innerHTML = `<p style="color:#f43f5e;">${msg}</p>`;
+      showInlineMessage(resultEl, msg);
     });
 
     es.onerror = () => {
       es.close();
       resetUI();
       progressArea.style.display = "none";
-      resultEl.innerHTML = `<p style="color:#f43f5e;">连接中断，请重试</p>`;
+      showInlineMessage(resultEl, "连接中断，请重试");
     };
 
     abortCtrl.signal.addEventListener("abort", () => es.close());
@@ -155,10 +157,10 @@ function renderDustResult(data, el) {
       const favDate = item.fav_time ? new Date(item.fav_time * 1000).toLocaleDateString("zh-CN") : "";
       html += `<li style="display:flex;justify-content:space-between;align-items:center;">
         <span>
-          <a href="${item.link}" target="_blank" rel="noopener">${item.title}</a>
-          <span class="meta"> — ${item.upper}</span>
+          <a href="${escapeAttr(item.link)}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
+          <span class="meta"> — ${escapeHtml(item.upper)}</span>
         </span>
-        <span class="meta">收藏: ${favDate} | ${item.folder_name || ""}</span>
+        <span class="meta">收藏: ${escapeHtml(favDate)} | ${escapeHtml(item.folder_name || "")}</span>
       </li>`;
     }
     html += `</ul></div>`;

@@ -1,3 +1,5 @@
+import { escapeAttr, escapeHtml, formatError, setButtonBusy, showInlineMessage, showToast } from "./ui.js";
+
 const BASE = "http://localhost:8000/api";
 const ANALYZE_URL = `${BASE}/analyze`;
 const SCAN_URL = `${BASE}/clean/scan`;
@@ -160,7 +162,7 @@ function renderCleanTab(el) {
 
 function renderCleanList(items, el) {
   if (items.length === 0) {
-    el.innerHTML = `<p style="color:#22c55e;">未发现失效视频</p>`;
+    showInlineMessage(el, "未发现失效视频", "success");
     return;
   }
   let html = `<div style="margin-bottom:12px;display:flex;gap:8px;">
@@ -169,10 +171,10 @@ function renderCleanList(items, el) {
   </div>`;
   for (const item of items) {
     html += `<label class="result-card" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-      <input type="checkbox" class="clean-cb" data-bvid="${item.bvid}" data-fid="${item.folder_id || ''}" data-mid="${item.id || 0}" style="width:16px;height:16px;" />
+      <input type="checkbox" class="clean-cb" data-bvid="${escapeAttr(item.bvid)}" data-fid="${escapeAttr(item.folder_id || '')}" data-mid="${escapeAttr(item.id || 0)}" style="width:16px;height:16px;" />
       <div>
-        <a href="${item.link}" target="_blank">${item.title}</a>
-        <span class="meta"> — ${item.upper} | ${item.folder_name}</span>
+        <a href="${escapeAttr(item.link)}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
+        <span class="meta"> — ${escapeHtml(item.upper)} | ${escapeHtml(item.folder_name)}</span>
       </div>
     </label>`;
   }
@@ -185,20 +187,30 @@ function renderCleanList(items, el) {
   });
 
   document.getElementById("removeBtn").addEventListener("click", async () => {
+    const removeBtn = document.getElementById("removeBtn");
     const cbs = el.querySelectorAll(".clean-cb:checked");
     const items = [...cbs].map(c => ({ bvid: c.dataset.bvid, folder_id: parseInt(c.dataset.fid) || 0, media_id: parseInt(c.dataset.mid) || 0 }));
-    if (!items.length) return alert("请勾选要移除的视频");
+    if (!items.length) {
+      showToast("请勾选要移除的视频", "error");
+      return;
+    }
     if (!confirm(`确认移除 ${items.length} 个失效视频？`)) return;
 
-    const resp = await fetch(REMOVE_URL, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items }),
-    });
-    const data = await resp.json();
-    if (data.error) { alert(data.error); return; }
-    el.innerHTML = `<p style="color:#22c55e;">已移除 ${data.removed}/${data.total} 个视频</p>`;
+    try {
+      setButtonBusy(removeBtn, true, "移除中…");
+      const resp = await fetch(REMOVE_URL, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      showInlineMessage(el, `已移除 ${data.removed}/${data.total} 个视频`, "success");
+    } catch (e) {
+      showToast(formatError(e, "移除失败"), "error");
+      setButtonBusy(removeBtn, false);
+    }
   });
 }
 
@@ -249,42 +261,57 @@ function renderReclassifyTab(el) {
       es.close(); btn.disabled = false;
       progress.innerHTML = `<span style="color:#f43f5e;">分析失败</span>`;
     });
-    es.onerror = () => { es.close(); btn.disabled = false; };
+    es.onerror = () => {
+      es.close();
+      btn.disabled = false;
+      progress.innerHTML = `<span style="color:#f43f5e;">连接中断，请重试</span>`;
+    };
   });
 
   document.getElementById("saveClassifyBtn").addEventListener("click", async () => {
     const status = document.getElementById("saveStatus");
+    const saveBtn = document.getElementById("saveClassifyBtn");
     status.textContent = "保存中…";
-    const resp = await fetch(SAVE_URL, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ folder_name: "全部收藏夹", categories: classifyData.categories }),
-    });
-    const d = await resp.json();
-    status.textContent = d.success ? `已保存 (${d.filename})` : `失败: ${d.error}`;
+    try {
+      setButtonBusy(saveBtn, true, "保存中…");
+      const resp = await fetch(SAVE_URL, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder_name: "全部收藏夹", categories: classifyData.categories }),
+      });
+      const d = await resp.json();
+      if (d.error) throw new Error(d.error);
+      status.textContent = d.success ? `已保存 (${d.filename})` : "保存完成";
+      showToast("分类结果已保存", "success");
+    } catch (e) {
+      status.textContent = `失败: ${formatError(e)}`;
+    } finally {
+      setButtonBusy(saveBtn, false);
+    }
   });
 }
 
 function renderEditableResult(data, el) {
-  let html = `<p style="margin-bottom:12px;">共 ${data.total} 条，${data.categories.length} 个分类（拖拽视频可移动，点击分类名可编辑）</p>`;
+  let html = `<p style="margin-bottom:12px;">共 ${Number(data.total || 0)} 条，${data.categories.length} 个分类（拖拽视频可移动，双击分类名可编辑）</p>`;
   data.categories.forEach((cat, ci) => {
+    const items = cat.items || [];
     html += `<div class="result-card cat-card" data-ci="${ci}" style="border-left:3px solid #FB7299;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <h3 class="cat-name" data-ci="${ci}" style="cursor:pointer;margin:0;" title="点击编辑名称">${cat.name} <span class="item-count">（${cat.items.length}）</span></h3>
+        <h3 class="cat-name" data-ci="${ci}" style="cursor:pointer;margin:0;" title="双击编辑名称">${escapeHtml(cat.name)} <span class="item-count">（${items.length}）</span></h3>
         <div style="display:flex;gap:6px;">
           <select class="merge-select" data-ci="${ci}" style="font-size:12px;padding:2px 4px;">
             <option value="">合并到…</option>
-            ${data.categories.map((c, i) => i !== ci ? `<option value="${i}">${c.name}</option>` : "").join("")}
+            ${data.categories.map((c, i) => i !== ci ? `<option value="${i}">${escapeHtml(c.name)}</option>` : "").join("")}
           </select>
           <button class="btn btn-secondary del-cat-btn" data-ci="${ci}" style="font-size:12px;padding:2px 8px;">×</button>
         </div>
       </div>
       <ul class="result-list cat-items" data-ci="${ci}">`;
-    cat.items.forEach((item, ii) => {
+    items.forEach((item, ii) => {
       html += `<li draggable="true" class="drag-item" data-ci="${ci}" data-ii="${ii}" style="cursor:grab;padding:6px 0;border-bottom:1px solid #f5f5f5;">
-        <a href="${item.link}" target="_blank">${item.title}</a>
-        <span class="meta"> — ${item.upper}</span>
+        <a href="${escapeAttr(item.link)}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
+        <span class="meta"> — ${escapeHtml(item.upper)}</span>
       </li>`;
     });
     html += `</ul></div>`;
@@ -373,8 +400,8 @@ async function renderHistoryTab(el) {
     }
     let html = `<ul class="result-list">`;
     for (const h of data.history) {
-      html += `<li style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" class="history-item" data-file="${h.filename}">
-        <span>${h.created_at} — ${h.total} 条 / ${h.categories_count} 类</span>
+      html += `<li style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" class="history-item" data-file="${escapeAttr(h.filename)}">
+        <span>${escapeHtml(h.created_at)} — ${Number(h.total || 0)} 条 / ${Number(h.categories_count || 0)} 类</span>
         <button class="btn btn-secondary" style="font-size:12px;padding:4px 10px;">查看</button>
       </li>`;
     }
@@ -385,21 +412,26 @@ async function renderHistoryTab(el) {
       li.addEventListener("click", async () => {
         const detailEl = document.getElementById("historyDetail");
         detailEl.innerHTML = `<p style="color:#999;">加载中…</p>`;
-        const resp = await fetch(`${LOAD_URL}?file=${li.dataset.file}`, { credentials: "include" });
-        const data = await resp.json();
-        if (data.error) { detailEl.innerHTML = `<p style="color:#f43f5e;">${data.error}</p>`; return; }
-        let dhtml = `<p style="margin-bottom:12px;">共 ${data.total} 条，${data.categories.length} 类</p>`;
-        for (const cat of data.categories) {
-          dhtml += `<div class="result-card"><h3>${cat.name}（${cat.items.length}）</h3><ul class="result-list">`;
-          for (const item of cat.items) {
-            dhtml += `<li><a href="${item.link}" target="_blank">${item.title}</a><span class="meta"> — ${item.upper}</span></li>`;
+        try {
+          const resp = await fetch(`${LOAD_URL}?file=${encodeURIComponent(li.dataset.file)}`, { credentials: "include" });
+          const data = await resp.json();
+          if (data.error) throw new Error(data.error);
+          let dhtml = `<p style="margin-bottom:12px;">共 ${Number(data.total || 0)} 条，${data.categories.length} 类</p>`;
+          for (const cat of data.categories) {
+            const items = cat.items || [];
+            dhtml += `<div class="result-card"><h3>${escapeHtml(cat.name)}（${items.length}）</h3><ul class="result-list">`;
+            for (const item of items) {
+              dhtml += `<li><a href="${escapeAttr(item.link)}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a><span class="meta"> — ${escapeHtml(item.upper)}</span></li>`;
+            }
+            dhtml += `</ul></div>`;
           }
-          dhtml += `</ul></div>`;
+          detailEl.innerHTML = dhtml;
+        } catch (e) {
+          showInlineMessage(detailEl, formatError(e, "加载失败"));
         }
-        detailEl.innerHTML = dhtml;
       });
     });
   } catch (e) {
-    el.innerHTML = `<p style="color:#f43f5e;">加载失败: ${e.message}</p>`;
+    showInlineMessage(el, `加载失败: ${formatError(e)}`);
   }
 }

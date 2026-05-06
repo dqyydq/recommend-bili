@@ -9,11 +9,23 @@ async function request(path, options = {}) {
       ...options.headers,
     },
   });
+
+  const contentType = resp.headers.get("content-type") || "";
+  const payload = contentType.includes("application/json")
+    ? await resp.json().catch(() => ({}))
+    : await resp.text();
+
   if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`HTTP ${resp.status}: ${text}`);
+    const detail = typeof payload === "string"
+      ? payload
+      : payload.error || payload.detail || payload.message;
+    throw new Error(detail || `HTTP ${resp.status}`);
   }
-  return resp.json();
+
+  if (payload && typeof payload === "object" && payload.error) {
+    throw new Error(payload.error);
+  }
+  return payload;
 }
 
 export function getQrcode() {

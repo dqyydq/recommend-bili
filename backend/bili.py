@@ -3,6 +3,9 @@ import time
 import httpx
 
 BILI_API = "https://api.bilibili.com"
+FAV_PAGE_SIZE = 20
+FOLDER_CONCURRENCY = 3
+PAGE_CONCURRENCY = 4
 BILI_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Referer": "https://space.bilibili.com/",
@@ -27,7 +30,59 @@ def _client(cookies: dict[str, str] | None = None, extra_headers: dict[str, str]
     h = dict(BILI_HEADERS)
     if extra_headers:
         h.update(extra_headers)
-    return httpx.AsyncClient(headers=h, cookies=jar, follow_redirects=True)
+    limits = httpx.Limits(max_connections=12, max_keepalive_connections=6)
+    return httpx.AsyncClient(headers=h, cookies=jar, follow_redirects=True, limits=limits)
+
+
+async def _get_fav_page(client: httpx.AsyncClient, folder_id: int, page: int, *, retries: int = 3) -> dict:
+    url = f"{BILI_API}/x/v3/fav/resource/list"
+    params = {
+        "media_id": folder_id,
+        "pn": page,
+        "ps": FAV_PAGE_SIZE,
+    }
+    for attempt in range(retries):
+        resp = await client.get(url, params=params, timeout=30)
+        if resp.status_code == 412:
+            if attempt < retries - 1:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") == 0:
+            return data
+        if data.get("code") == -412 and attempt < retries - 1:
+            await asyncio.sleep(1.5 * (attempt + 1))
+            continue
+        return data
+    return {"code": -1, "data": {}}
+
+
+def _media_to_item(media: dict, folder_id: int) -> dict:
+    return {
+        "id": media.get("id", 0),
+        "bvid": media.get("bvid", ""),
+        "title": media.get("title", ""),
+        "intro": media.get("intro", ""),
+        "upper": (media.get("upper") or {}).get("name", ""),
+        "cover": media.get("cover", ""),
+        "link": f"https://www.bilibili.com/video/{media.get('bvid', '')}",
+        "source_folder": str(folder_id),
+        "fav_time": media.get("fav_time", 0),
+    }
+
+
+def _page_count(data: dict, first_page_items: int, has_more: bool) -> int:
+    info = (data.get("data") or {}).get("info") or {}
+    total = info.get("media_count") or info.get("count") or info.get("cnt") or 0
+    try:
+        total = int(total)
+    except (TypeError, ValueError):
+        total = 0
+    if total > 0:
+        return max(1, (total + FAV_PAGE_SIZE - 1) // FAV_PAGE_SIZE)
+    return 2 if has_more and first_page_items else 1
 
 
 async def fetch_fav_folders(uid: str, cookies: dict[str, str] | None = None) -> list[dict]:
@@ -57,54 +112,60 @@ async def fetch_fav_folders(uid: str, cookies: dict[str, str] | None = None) -> 
 
 async def fetch_fav_items(folder_id: int, cookies: dict[str, str] | None = None,
                        client: httpx.AsyncClient | None = None) -> list[dict]:
-    items: list[dict] = []
-    page = 1
-
     async def _do(client: httpx.AsyncClient):
-        nonlocal page
-        while True:
-            url = f"{BILI_API}/x/v3/fav/resource/list"
-            params = {
-                "media_id": folder_id,
-                "pn": page,
-                "ps": 20,
-            }
-            resp = await client.get(url, params=params, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("code") != 0:
-                break
-            medias = (data.get("data") or {}).get("medias", []) or []
-            has_more = (data.get("data") or {}).get("has_more", False)
-            for media in medias:
-                items.append({
-                    "id": media.get("id", 0),
-                    "bvid": media.get("bvid", ""),
-                    "title": media.get("title", ""),
-                    "intro": media.get("intro", ""),
-                    "upper": (media.get("upper") or {}).get("name", ""),
-                    "cover": media.get("cover", ""),
-                    "link": f"https://www.bilibili.com/video/{media.get('bvid', '')}",
-                    "source_folder": str(folder_id),
-                    "fav_time": media.get("fav_time", 0),
-                })
-            if not has_more or not medias:
-                break
-            page += 1
-            await asyncio.sleep(0.3)
+        first = await _get_fav_page(client, folder_id, 1)
+        if first.get("code") != 0:
+            return []
+
+        first_data = first.get("data") or {}
+        first_medias = first_data.get("medias", []) or []
+        has_more = bool(first_data.get("has_more", False))
+        total_pages = _page_count(first, len(first_medias), has_more)
+        pages: dict[int, list[dict]] = {1: first_medias}
+
+        if total_pages == 2 and has_more and not ((first_data.get("info") or {}).get("media_count")):
+            page = 2
+            while has_more:
+                data = await _get_fav_page(client, folder_id, page)
+                if data.get("code") != 0:
+                    break
+                page_data = data.get("data") or {}
+                medias = page_data.get("medias", []) or []
+                if not medias:
+                    break
+                pages[page] = medias
+                has_more = bool(page_data.get("has_more", False))
+                page += 1
+        elif total_pages > 1:
+            semaphore = asyncio.Semaphore(PAGE_CONCURRENCY)
+
+            async def fetch_page(page: int) -> tuple[int, list[dict]]:
+                async with semaphore:
+                    data = await _get_fav_page(client, folder_id, page)
+                if data.get("code") != 0:
+                    return page, []
+                medias = (data.get("data") or {}).get("medias", []) or []
+                return page, medias
+
+            results = await asyncio.gather(*(fetch_page(page) for page in range(2, total_pages + 1)))
+            pages.update(dict(results))
+
+        items: list[dict] = []
+        for page in sorted(pages):
+            items.extend(_media_to_item(media, folder_id) for media in pages[page])
+        return items
 
     if client is not None:
-        await _do(client)
+        return await _do(client)
     else:
         async with _client(cookies) as client:
-            await _do(client)
-    return items
+            return await _do(client)
 
 
 async def fetch_all_items(uid: str, cookies: dict[str, str] | None = None,
                           folders: list[dict] | None = None,
                           on_progress=None) -> list[dict]:
-    """串行抓取所有收藏夹，文件夹间隔 0.8s，412自动重试"""
+    """Fetch all favorite folders concurrently and back off only on failures."""
     if folders is None:
         folders = await fetch_fav_folders(uid, cookies)
     valid = [(f.get("media_id") or f.get("id"), f)
@@ -112,38 +173,49 @@ async def fetch_all_items(uid: str, cookies: dict[str, str] | None = None,
     if not valid:
         return []
 
-    all_items: list[dict] = []
-    for i, (fid, folder) in enumerate(valid):
+    completed_total = 0
+    results_by_folder: list[list[dict]] = [[] for _ in valid]
+    total_lock = asyncio.Lock()
+    semaphore = asyncio.Semaphore(FOLDER_CONCURRENCY)
+
+    async def fetch_folder(client: httpx.AsyncClient, index: int, fid: int, folder: dict) -> list[dict]:
+        nonlocal completed_total
         fname = folder.get("title", "收藏夹")
         items: list[dict] = []
-        for attempt in range(3):
-            try:
-                items = await fetch_fav_items(fid, cookies)
-                break
-            except Exception as e:
-                err = str(e)
-                if "412" in err and attempt < 2:
-                    delay = (attempt + 1) * 3
-                    print(f"[fetch_all] '{fname}' 412限流, {delay}s 后重试 (第{attempt+1}次)")
-                    await asyncio.sleep(delay)
-                else:
-                    print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 抓取异常: {e}")
-                    items = []
+        async with semaphore:
+            for attempt in range(3):
+                try:
+                    items = await fetch_fav_items(fid, cookies, client=client)
                     break
-        if not items and attempt == 2:
-            print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 重试3次仍失败，跳过")
+                except Exception as e:
+                    if attempt < 2:
+                        delay = 1.5 * (attempt + 1)
+                        print(f"[fetch_all] '{fname}' fetch failed, retry in {delay:.1f}s: {e}")
+                        await asyncio.sleep(delay)
+                    else:
+                        print(f"[fetch_all] folder '{fname}' (id={fid}) failed: {e}")
+                        items = []
         if not items:
-            print(f"[fetch_all] 收藏夹 '{fname}' (id={fid}) 返回 0 条")
+            print(f"[fetch_all] folder '{fname}' (id={fid}) returned 0 items")
         for item in items:
             item["folder_name"] = fname
             item["folder_id"] = fid
-        all_items.extend(items)
+        async with total_lock:
+            results_by_folder[index] = items
+            completed_total += len(items)
+            total = completed_total
         if on_progress:
-            await on_progress(fname, len(items), len(all_items))
-        # 文件夹间间隔
-        if i < len(valid) - 1:
-            await asyncio.sleep(0.8)
+            await on_progress(fname, len(items), total)
+        return items
 
+    async with _client(cookies) as client:
+        tasks = [
+            asyncio.create_task(fetch_folder(client, index, fid, folder))
+            for index, (fid, folder) in enumerate(valid)
+        ]
+        await asyncio.gather(*tasks)
+
+    all_items = [item for items in results_by_folder for item in items]
     print(f"[fetch_all] 完成: {len(all_items)} 条, {len(folders)} 个收藏夹")
     return all_items
 

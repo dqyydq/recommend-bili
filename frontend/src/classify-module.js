@@ -1,4 +1,5 @@
 import { getFolders } from "./api.js";
+import { escapeAttr, escapeHtml, showInlineMessage } from "./ui.js";
 
 const SSE_BASE = "http://localhost:8000/api/analyze";
 
@@ -124,13 +125,13 @@ export async function renderClassifyModule(container) {
           if (d.error) msg = d.error;
         }
       } catch (_) {}
-      resultEl.innerHTML = `<p style="color:#f43f5e;">${msg}</p>`;
+      showInlineMessage(resultEl, msg);
     });
 
     es.onerror = () => {
       es.close();
       resetUI();
-      resultEl.innerHTML = `<p style="color:#f43f5e;">连接中断，请重试</p>`;
+      showInlineMessage(resultEl, "连接中断，请重试");
     };
 
     abortCtrl.signal.addEventListener("abort", () => {
@@ -151,15 +152,17 @@ export async function renderClassifyModule(container) {
 }
 
 function renderResult(data, resultEl) {
-  let html = `<p style="margin-bottom:16px;">共 ${data.total} 条收藏，分为 ${data.categories.length} 类：</p>`;
-  for (const cat of data.categories) {
+  const categories = data.categories || [];
+  let html = `<p style="margin-bottom:16px;">共 ${Number(data.total || 0)} 条收藏，分为 ${categories.length} 类：</p>`;
+  for (const cat of categories) {
+    const items = cat.items || [];
     html += `<div class="result-card">
-      <h3>${cat.name} <span class="item-count">（${cat.items.length}）</span></h3>
+      <h3>${escapeHtml(cat.name)} <span class="item-count">（${items.length}）</span></h3>
       <ul class="result-list">`;
-    for (const item of cat.items) {
+    for (const item of items) {
       html += `<li>
-        <a href="${item.link}" target="_blank" rel="noopener">${item.title}</a>
-        <span class="meta"> — ${item.upper}</span>
+        <a href="${escapeAttr(item.link)}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
+        <span class="meta"> — ${escapeHtml(item.upper)}</span>
       </li>`;
     }
     html += `</ul></div>`;

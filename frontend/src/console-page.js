@@ -3,6 +3,7 @@ import { renderClassifyModule } from "./classify-module.js";
 import { renderSearchModule } from "./search-module.js";
 import { renderDustModule } from "./dust-module.js";
 import { renderOrganizeModule } from "./organize-module.js";
+import { escapeAttr, escapeHtml, setButtonBusy, showToast } from "./ui.js";
 
 export function renderConsole(app, user) {
   app.innerHTML = `
@@ -18,8 +19,8 @@ export function renderConsole(app, user) {
         <div class="header">
           <div class="page-title" id="pageTitle">整理收藏夹</div>
           <div class="user-info">
-            <img src="${user.avatar || ''}" alt="" onerror="this.style.display='none'" />
-            <span>${user.nickname || "用户"}</span>
+            <img src="${escapeAttr(user.avatar || '')}" alt="" onerror="this.style.display='none'" />
+            <span>${escapeHtml(user.nickname || "用户")}</span>
             <button id="settingsBtn" class="logout-btn" title="设置" style="font-size:16px;">&#9881;</button>
             <button id="logoutBtn" class="logout-btn">退出</button>
           </div>
@@ -65,6 +66,7 @@ export function renderConsole(app, user) {
     const modal = document.createElement("div");
     modal.id = "settingsModal";
     modal.className = "modal-overlay";
+    modal.tabIndex = -1;
     modal.innerHTML = `
       <div class="modal">
         <h3>设置</h3>
@@ -89,45 +91,54 @@ export function renderConsole(app, user) {
       </div>
     `;
     document.body.appendChild(modal);
+    modal.focus();
 
     const keyInput = document.getElementById("settingsKeyInput");
     const modelInput = document.getElementById("settingsModelInput");
 
-    // Load current settings
+    let maskedKey = "";
     getSettings().then(data => {
-      keyInput.value = data.api_key || "";
+      maskedKey = data.api_key || "";
+      keyInput.value = maskedKey;
       modelInput.value = data.model || "deepseek-v4-flash";
     }).catch(() => {});
 
-    // Clear masked key on focus
-    const currentKey = keyInput.value;
     keyInput.addEventListener("focus", () => {
-      if (keyInput.value === currentKey && keyInput.value.includes("*")) {
+      if (maskedKey && keyInput.value === maskedKey && keyInput.value.includes("*")) {
         keyInput.value = "";
       }
     });
 
     document.getElementById("cancelSettingsBtn").addEventListener("click", () => modal.remove());
     document.getElementById("saveSettingsBtn").addEventListener("click", async () => {
+      const saveBtn = document.getElementById("saveSettingsBtn");
       const newKey = keyInput.value.trim();
       const newModel = modelInput.value.trim() || "deepseek-v4-flash";
       const errEl = document.getElementById("settingsError");
 
       try {
+        errEl.style.display = "none";
+        setButtonBusy(saveBtn, true, "保存中…");
         if (newKey && !newKey.includes("*")) {
           await setApiKey(newKey);
         }
         await setModel(newModel);
         modal.remove();
+        showToast("设置已保存", "success");
       } catch (e) {
         errEl.textContent = "保存失败: " + e.message;
         errEl.style.display = "block";
+      } finally {
+        setButtonBusy(saveBtn, false);
       }
     });
 
     // Close on overlay click
     modal.addEventListener("click", (e) => {
       if (e.target === modal) modal.remove();
+    });
+    modal.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") modal.remove();
     });
   }
 
