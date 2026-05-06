@@ -81,6 +81,25 @@ export function addToFavorite(bvid, folderId) {
   });
 }
 
+export function analyzeProfile() {
+  return request("/agents/profile");
+}
+
+export function rebuildSearchIndex() {
+  return request("/agents/search/index", { method: "POST" });
+}
+
+export function semanticSearch(q, options = {}) {
+  return request("/agents/search", {
+    method: "POST",
+    body: JSON.stringify({
+      q,
+      top_k: options.topK || 8,
+      refresh: Boolean(options.refresh),
+    }),
+  });
+}
+
 export function logout() {
   return request("/auth/logout", { method: "POST" });
 }

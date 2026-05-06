@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from agents import analyze_favorite_profile, rebuild_favorite_index, semantic_search_favorites
 from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool, on_session_updated
 from bili import fetch_fav_folders, fetch_fav_items, fetch_all_items, search_all, add_favorite, _client
 from classifier import classify_favorites
@@ -72,6 +73,12 @@ class KeyRequest(BaseModel):
 
 class ModelRequest(BaseModel):
     model: str
+
+
+class SemanticSearchRequest(BaseModel):
+    q: str
+    top_k: int = 8
+    refresh: bool = False
 
 
 @app.get("/api/settings")
@@ -429,6 +436,61 @@ async def api_favorites_add(req: AddFavoriteRequest, session: dict = Depends(get
         cookies = session.get("bili_cookies", {})
         result = await add_favorite(req.bvid, req.folder_id, cookies)
         return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------- Agent 能力 ----------
+
+@app.get("/api/agents/profile")
+async def api_agent_profile(session: dict = Depends(get_session)):
+    api_key = session.get("deepseek_key", "")
+    if not api_key:
+        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
+    try:
+        cookies = session.get("bili_cookies", {})
+        uid = session.get("uid", "")
+        folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+        session["folders"] = folders
+        model = session.get("model", "deepseek-v4-flash")
+        return await analyze_favorite_profile(uid, cookies, api_key, model, folders=folders)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/agents/search/index")
+async def api_agent_search_index(session: dict = Depends(get_session)):
+    try:
+        cookies = session.get("bili_cookies", {})
+        uid = session.get("uid", "")
+        folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+        session["folders"] = folders
+        return await rebuild_favorite_index(uid, cookies, folders=folders)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/agents/search")
+async def api_agent_search(req: SemanticSearchRequest, session: dict = Depends(get_session)):
+    api_key = session.get("deepseek_key", "")
+    if not api_key:
+        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
+    try:
+        cookies = session.get("bili_cookies", {})
+        uid = session.get("uid", "")
+        folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+        session["folders"] = folders
+        model = session.get("model", "deepseek-v4-flash")
+        return await semantic_search_favorites(
+            uid,
+            cookies,
+            req.q,
+            api_key,
+            model,
+            folders=folders,
+            top_k=req.top_k,
+            refresh=req.refresh,
+        )
     except Exception as e:
         return {"error": str(e)}
 

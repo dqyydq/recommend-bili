@@ -476,3 +476,178 @@ body {
   70% { transform: scale(1.2); }
   100% { transform: scale(1); opacity: 1; }
 }
+
+/* Agent 实验室 */
+.agent-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.agent-hint,
+.muted {
+  font-size: 13px;
+  color: #999;
+}
+
+.agent-profile,
+.agent-answer {
+  background: #fff;
+  border-radius: 8px;
+  padding: 22px;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+}
+
+.agent-profile-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.agent-kicker {
+  font-size: 12px;
+  font-weight: 700;
+  color: #23ade5;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.agent-profile h2 {
+  font-size: 28px;
+  color: #222;
+  margin-bottom: 6px;
+}
+
+.agent-profile p,
+.agent-answer p {
+  color: #555;
+  line-height: 1.7;
+}
+
+.agent-score-card {
+  min-width: 180px;
+  border: 1px solid #f1f1f1;
+  border-radius: 8px;
+  padding: 14px;
+  text-align: right;
+}
+
+.agent-score-card strong {
+  display: block;
+  font-size: 34px;
+  color: #FB7299;
+}
+
+.agent-score-card span,
+.agent-score-card small,
+.agent-answer small {
+  display: block;
+  color: #999;
+  font-size: 12px;
+}
+
+.agent-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.agent-tags span {
+  background: #fdf2f5;
+  color: #FB7299;
+  border: 1px solid #ffd5e1;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.agent-panel {
+  border: 1px solid #f1f1f1;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.agent-panel h3 {
+  font-size: 15px;
+  margin-bottom: 10px;
+  color: #333;
+}
+
+.agent-panel ul {
+  padding-left: 18px;
+  color: #666;
+  line-height: 1.7;
+  font-size: 14px;
+}
+
+.agent-meter {
+  margin-bottom: 10px;
+}
+
+.agent-meter-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #666;
+  margin-bottom: 5px;
+}
+
+.agent-meter-track {
+  height: 7px;
+  background: #f1f1f1;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.agent-meter-track div {
+  height: 100%;
+  background: linear-gradient(90deg, #23ade5, #FB7299);
+}
+
+.agent-results {
+  margin-top: 14px;
+}
+
+.agent-result-item {
+  background: #fff;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+}
+
+.agent-result-item a {
+  color: #333;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.agent-result-item a:hover {
+  color: #FB7299;
+}
+
+@media (max-width: 760px) {
+  .agent-toolbar,
+  .agent-profile-head {
+    flex-direction: column;
+  }
+
+  .agent-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-score-card {
+    width: 100%;
+    text-align: left;
+  }
+}
