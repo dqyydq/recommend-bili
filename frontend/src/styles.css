@@ -636,6 +636,136 @@ body {
   color: #FB7299;
 }
 
+.agent-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.agent-stat-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+  border-top: 3px solid #23ade5;
+}
+
+.agent-stat-card span,
+.agent-stat-card small {
+  display: block;
+  color: #999;
+  font-size: 12px;
+}
+
+.agent-stat-card strong {
+  display: block;
+  color: #222;
+  font-size: 30px;
+  margin: 4px 0;
+}
+
+.agent-compact-list {
+  list-style: none;
+  padding-left: 0;
+}
+
+.agent-compact-list li {
+  padding: 8px 0;
+  border-bottom: 1px solid #f5f5f5;
+}
+
+.agent-compact-list li:last-child {
+  border-bottom: none;
+}
+
+.agent-compact-list a {
+  display: block;
+  color: #333;
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.agent-compact-list a:hover {
+  color: #FB7299;
+}
+
+.agent-compact-list span,
+.agent-compact-list em,
+.agent-reason {
+  display: block;
+  color: #999;
+  font-size: 12px;
+  margin-top: 3px;
+  font-style: normal;
+}
+
+.agent-reason {
+  color: #23ade5;
+}
+
+.agent-warning {
+  background: #fff7ed;
+  color: #9a3412;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+.agent-stage-list {
+  margin-top: 14px;
+}
+
+.agent-stage {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.agent-stage-index {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #23ade5;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+}
+
+.agent-stage-body {
+  background: #fff;
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+}
+
+.agent-stage-body h3 {
+  font-size: 16px;
+  margin-bottom: 6px;
+  color: #222;
+}
+
+.agent-stage-body p {
+  color: #666;
+  font-size: 14px;
+  line-height: 1.6;
+  margin-bottom: 10px;
+}
+
+.agent-task {
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: #555;
+}
+
 @media (max-width: 760px) {
   .agent-toolbar,
   .agent-profile-head {
@@ -644,6 +774,10 @@ body {
 
   .agent-grid {
     grid-template-columns: 1fr;
+  }
+
+  .agent-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .agent-score-card {

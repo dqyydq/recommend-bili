@@ -12,6 +12,7 @@ from classifier import DEEPSEEK_BASE_URL, get_embeddings
 CHROMA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "chroma"))
 PROFILE_SAMPLE_SIZE = 80
 CHROMA_BATCH_SIZE = 500
+RECENT_LIMIT = 6
 
 
 def _safe_collection_name(uid: str) -> str:
@@ -81,6 +82,89 @@ def _fallback_profile(items: list[dict]) -> dict:
             "今天挑 3 个最想看的视频，建一个「本周真看」小清单。",
             "把重复的入门教程合并，只留下最新或最系统的一版。",
             "给最大的一类收藏起一个更具体的名字，减少下次寻找成本。",
+        ],
+    }
+
+
+def _keyword_reason(query: str, meta: dict) -> str:
+    haystack = f"{meta.get('title', '')} {meta.get('folder_name', '')} {meta.get('upper', '')}".lower()
+    tokens = [token.lower() for token in re.findall(r"[\u4e00-\u9fa5A-Za-z0-9]{2,}", query)]
+    hits = [token for token in tokens if token in haystack]
+    if hits:
+        return f"命中关键词：{', '.join(hits[:3])}"
+    if meta.get("folder_name"):
+        return f"语义接近，来源收藏夹：{meta.get('folder_name')}"
+    return "语义相似度较高"
+
+
+async def build_knowledge_dashboard(uid: str, cookies: dict, folders: list[dict] | None = None) -> dict:
+    items, folders = await fetch_session_items(uid, cookies, folders)
+    now = time.time()
+    dust_items = [
+        item for item in items
+        if item.get("fav_time") and now - item.get("fav_time", 0) > 60 * 86400
+    ]
+    light_dust_items = [
+        item for item in items
+        if item.get("fav_time") and 30 * 86400 < now - item.get("fav_time", 0) <= 60 * 86400
+    ]
+    folders_counter = Counter(item.get("folder_name", "收藏夹") for item in items)
+    uppers_counter = Counter(item.get("upper", "") for item in items if item.get("upper"))
+    recent_items = sorted(items, key=lambda item: item.get("fav_time", 0), reverse=True)[:RECENT_LIMIT]
+    old_but_named = sorted(dust_items, key=lambda item: item.get("fav_time", 0))[:RECENT_LIMIT]
+
+    collection_count = 0
+    try:
+        collection_count = _get_chroma_collection(uid).count()
+    except Exception:
+        collection_count = 0
+
+    total = len(items)
+    health_score = 100
+    if total:
+        health_score -= min(45, int(len(dust_items) / total * 60))
+        health_score -= min(20, max(0, len(folders_counter) - 12))
+    health_score = max(30 if total else 0, min(100, health_score))
+
+    return {
+        "total": total,
+        "folders_count": len(folders or []),
+        "indexed": collection_count,
+        "dust_count": len(dust_items),
+        "light_dust_count": len(light_dust_items),
+        "health_score": health_score,
+        "top_folders": [
+            {"name": name, "count": count}
+            for name, count in folders_counter.most_common(6)
+        ],
+        "top_uppers": [
+            {"name": name, "count": count}
+            for name, count in uppers_counter.most_common(6)
+        ],
+        "recent_items": [
+            {
+                "title": item.get("title", ""),
+                "upper": item.get("upper", ""),
+                "link": item.get("link", ""),
+                "folder_name": item.get("folder_name", ""),
+                "fav_time": item.get("fav_time", 0),
+            }
+            for item in recent_items
+        ],
+        "today_actions": [
+            "用智能检索找一个今天要看的主题。",
+            "从高吃灰收藏里打开 1 个仍然有价值的视频。",
+            "重建一次索引，确保最近新增收藏可被语义检索。",
+        ],
+        "cleanup_candidates": [
+            {
+                "title": item.get("title", ""),
+                "upper": item.get("upper", ""),
+                "link": item.get("link", ""),
+                "folder_name": item.get("folder_name", ""),
+                "fav_time": item.get("fav_time", 0),
+            }
+            for item in old_but_named
         ],
     }
 
@@ -256,6 +340,7 @@ async def semantic_search_favorites(
             "folder_name": meta.get("folder_name", ""),
             "bvid": meta.get("bvid", ""),
             "score": round(1 - float(distance), 4),
+            "reason": _keyword_reason(query, meta),
         })
 
     context = "\n".join(
@@ -296,3 +381,95 @@ async def semantic_search_favorites(
         "results": results,
         "indexed": count,
     }
+
+
+def _fallback_learning_path(goal: str, results: list[dict], indexed: int) -> dict:
+    stages = []
+    chunk_size = max(1, min(3, len(results)))
+    for index in range(0, min(len(results), 9), chunk_size):
+        stage_items = results[index:index + chunk_size]
+        stages.append({
+            "title": f"第 {len(stages) + 1} 阶段",
+            "purpose": "按相关度逐步消化收藏内容。",
+            "items": stage_items,
+            "task": "看完后用一句话记录这个视频解决了什么问题。",
+        })
+    return {
+        "goal": goal,
+        "summary": f"基于 {indexed} 条已索引收藏，我先排出一条可执行路线。",
+        "stages": stages,
+        "warnings": [] if results else ["没有找到足够相关的收藏，建议换一个更具体的目标。"],
+    }
+
+
+async def build_learning_path(
+    uid: str,
+    cookies: dict,
+    goal: str,
+    api_key: str,
+    model: str,
+    folders: list[dict] | None = None,
+    refresh: bool = False,
+) -> dict:
+    search = await semantic_search_favorites(
+        uid,
+        cookies,
+        goal,
+        api_key,
+        model,
+        folders=folders,
+        top_k=12,
+        refresh=refresh,
+    )
+    if search.get("error"):
+        return search
+    results = search.get("results", [])
+    if not results:
+        return _fallback_learning_path(goal, [], search.get("indexed", 0))
+
+    context = "\n".join(
+        f"{index + 1}. {item.get('title', '')} | UP:{item.get('upper', '')} | 收藏夹:{item.get('folder_name', '')} | 链接:{item.get('link', '')}"
+        for index, item in enumerate(results)
+    )
+    prompt = f"""
+你是一个学习路线 Agent。用户希望从自己的 B 站收藏夹中完成一个目标。
+请只基于给定收藏视频规划路线，不要编造新视频。输出 JSON，不要 Markdown。
+
+JSON schema:
+{{
+  "goal": "用户目标",
+  "summary": "路线总体说明，不超过80字",
+  "stages": [
+    {{
+      "title": "阶段名",
+      "purpose": "为什么先做这个阶段",
+      "items": [{{"title":"视频标题","upper":"UP主","link":"链接","folder_name":"收藏夹","reason":"为什么放在这里"}}],
+      "task": "阶段完成后的具体小任务"
+    }}
+  ],
+  "warnings": ["可选，说明结果不足或需要补充的地方"]
+}}
+
+用户目标：{goal}
+
+候选收藏：
+{context}
+""".strip()
+
+    try:
+        client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1200,
+            temperature=0.45,
+        )
+        path = _json_from_text(resp.choices[0].message.content or "")
+    except Exception as e:
+        print(f"[learning_agent] LLM failed, using fallback: {e}")
+        path = {}
+
+    if not path:
+        path = _fallback_learning_path(goal, results, search.get("indexed", 0))
+    path["indexed"] = search.get("indexed", 0)
+    return path

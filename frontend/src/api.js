@@ -85,6 +85,10 @@ export function analyzeProfile() {
   return request("/agents/profile");
 }
 
+export function getKnowledgeDashboard() {
+  return request("/agents/dashboard");
+}
+
 export function rebuildSearchIndex() {
   return request("/agents/search/index", { method: "POST" });
 }
@@ -95,6 +99,16 @@ export function semanticSearch(q, options = {}) {
     body: JSON.stringify({
       q,
       top_k: options.topK || 8,
+      refresh: Boolean(options.refresh),
+    }),
+  });
+}
+
+export function buildLearningPath(goal, options = {}) {
+  return request("/agents/learning-path", {
+    method: "POST",
+    body: JSON.stringify({
+      goal,
       refresh: Boolean(options.refresh),
     }),
   });

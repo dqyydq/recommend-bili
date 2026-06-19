@@ -8,7 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from agents import analyze_favorite_profile, rebuild_favorite_index, semantic_search_favorites
+from agents import (
+    analyze_favorite_profile,
+    build_knowledge_dashboard,
+    build_learning_path,
+    rebuild_favorite_index,
+    semantic_search_favorites,
+)
 from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool, on_session_updated
 from bili import fetch_fav_folders, fetch_fav_items, fetch_all_items, search_all, add_favorite, _client
 from classifier import classify_favorites
@@ -78,6 +84,11 @@ class ModelRequest(BaseModel):
 class SemanticSearchRequest(BaseModel):
     q: str
     top_k: int = 8
+    refresh: bool = False
+
+
+class LearningPathRequest(BaseModel):
+    goal: str
     refresh: bool = False
 
 
@@ -442,6 +453,17 @@ async def api_favorites_add(req: AddFavoriteRequest, session: dict = Depends(get
 
 # ---------- Agent 能力 ----------
 
+@app.get("/api/agents/dashboard")
+async def api_agent_dashboard(session: dict = Depends(get_session)):
+    try:
+        cookies = session.get("bili_cookies", {})
+        uid = session.get("uid", "")
+        folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+        session["folders"] = folders
+        return await build_knowledge_dashboard(uid, cookies, folders=folders)
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/api/agents/profile")
 async def api_agent_profile(session: dict = Depends(get_session)):
     api_key = session.get("deepseek_key", "")
@@ -454,6 +476,30 @@ async def api_agent_profile(session: dict = Depends(get_session)):
         session["folders"] = folders
         model = session.get("model", "deepseek-v4-flash")
         return await analyze_favorite_profile(uid, cookies, api_key, model, folders=folders)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/agents/learning-path")
+async def api_agent_learning_path(req: LearningPathRequest, session: dict = Depends(get_session)):
+    api_key = session.get("deepseek_key", "")
+    if not api_key:
+        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
+    try:
+        cookies = session.get("bili_cookies", {})
+        uid = session.get("uid", "")
+        folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+        session["folders"] = folders
+        model = session.get("model", "deepseek-v4-flash")
+        return await build_learning_path(
+            uid,
+            cookies,
+            req.goal,
+            api_key,
+            model,
+            folders=folders,
+            refresh=req.refresh,
+        )
     except Exception as e:
         return {"error": str(e)}
 
