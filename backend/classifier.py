@@ -1,36 +1,15 @@
 import asyncio
 import os
 
-import httpx
 import numpy as np
 from openai import AsyncOpenAI
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/embeddings")
-OLLAMA_MODEL = "nomic-embed-text"
+from embedding import get_embeddings
+
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-EMBEDDING_CONCURRENCY = int(os.getenv("EMBEDDING_CONCURRENCY", "4"))
 LLM_NAMING_CONCURRENCY = int(os.getenv("LLM_NAMING_CONCURRENCY", "4"))
-
-
-async def get_embeddings(texts: list[str]) -> list[list[float]]:
-    semaphore = asyncio.Semaphore(EMBEDDING_CONCURRENCY)
-
-    async def embed_one(client: httpx.AsyncClient, text: str) -> list[float]:
-        async with semaphore:
-            payload = {
-                "model": OLLAMA_MODEL,
-                "prompt": text,
-            }
-            resp = await client.post(OLLAMA_URL, json=payload, timeout=60)
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("embedding", [])
-
-    limits = httpx.Limits(max_connections=EMBEDDING_CONCURRENCY, max_keepalive_connections=EMBEDDING_CONCURRENCY)
-    async with httpx.AsyncClient(limits=limits) as client:
-        return await asyncio.gather(*(embed_one(client, text) for text in texts))
 
 
 def cluster_items(embeddings: list[list[float]], n_clusters: int) -> list[int]:

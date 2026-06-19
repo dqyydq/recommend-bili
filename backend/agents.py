@@ -7,7 +7,8 @@ from collections import Counter
 from openai import AsyncOpenAI
 
 from bili import fetch_all_items, fetch_fav_folders
-from classifier import DEEPSEEK_BASE_URL, get_embeddings
+from classifier import DEEPSEEK_BASE_URL
+from embedding import embedding_collection_suffix, get_embeddings
 
 CHROMA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "chroma"))
 PROFILE_SAMPLE_SIZE = 80
@@ -17,7 +18,8 @@ RECENT_LIMIT = 6
 
 def _safe_collection_name(uid: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", uid or "anonymous")
-    return f"favorites_{cleaned}"[:63]
+    suffix = embedding_collection_suffix()
+    return f"favorites_{cleaned}_{suffix}"[:63]
 
 
 def _item_text(item: dict) -> str:
@@ -260,16 +262,16 @@ def _get_chroma_collection(uid: str):
 
 async def rebuild_favorite_index(uid: str, cookies: dict, folders: list[dict] | None = None) -> dict:
     items, folders = await fetch_session_items(uid, cookies, folders)
-    collection = _get_chroma_collection(uid)
-    existing = collection.get(include=[])
-    if existing.get("ids"):
-        collection.delete(ids=existing["ids"])
-
     if not items:
         return {"indexed": 0, "folders_count": len(folders or [])}
 
     texts = [_item_text(item) for item in items]
     embeddings = await get_embeddings(texts)
+    collection = _get_chroma_collection(uid)
+    existing = collection.get(include=[])
+    if existing.get("ids"):
+        collection.delete(ids=existing["ids"])
+
     ids = [
         f"{item.get('bvid') or 'item'}-{item.get('folder_id') or item.get('source_folder') or 'folder'}-{index}"
         for index, item in enumerate(items)
