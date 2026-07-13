@@ -33,6 +33,7 @@ export async function renderClassifyModule(container) {
   `;
 
   let abortCtrl = null;
+  let streamHandled = false;
 
   const folderSelect = document.getElementById("folderSelect");
   const btn = document.getElementById("analyzeBtn");
@@ -87,6 +88,7 @@ export async function renderClassifyModule(container) {
     const url = fid ? `${SSE_BASE}?folder_id=${fid}` : SSE_BASE;
 
     abortCtrl = new AbortController();
+    streamHandled = false;
     const es = new EventSource(url, { withCredentials: true });
 
     es.addEventListener("progress", (e) => {
@@ -109,6 +111,7 @@ export async function renderClassifyModule(container) {
     });
 
     es.addEventListener("result", (e) => {
+      streamHandled = true;
       es.close();
       resetUI();
       const data = JSON.parse(e.data);
@@ -116,6 +119,7 @@ export async function renderClassifyModule(container) {
     });
 
     es.addEventListener("error", (e) => {
+      streamHandled = true;
       es.close();
       resetUI();
       let msg = "请求失败";
@@ -129,6 +133,8 @@ export async function renderClassifyModule(container) {
     });
 
     es.onerror = () => {
+      if (streamHandled) return;
+      streamHandled = true;
       es.close();
       resetUI();
       showInlineMessage(resultEl, "连接中断，请重试");
@@ -140,6 +146,7 @@ export async function renderClassifyModule(container) {
   });
 
   cancelBtn.addEventListener("click", () => {
+    streamHandled = true;
     if (abortCtrl) abortCtrl.abort();
     resetUI();
   });
