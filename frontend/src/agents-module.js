@@ -2,6 +2,7 @@ import {
   analyzeProfile,
   approveOrganizationPlan,
   buildLearningPath,
+  buildFolderStructurePlan,
   buildOrganizationPlan,
   buildLearningProjectPlan,
   chatLearningProject,
@@ -10,12 +11,15 @@ import {
   createLearningProject,
   executeOrganizationPlan,
   getKnowledgeDashboard,
+  getFolderStructurePlans,
   getLearningProject,
   getLearningProjects,
   getOrganizationPlans,
   rebuildSearchIndex,
   semanticSearch,
   updateOrganizationPlanAction,
+  updateFolderStructureAction,
+  finalizeFolderStructurePlan,
   updateLearningProjectTask,
   reviewLearningProject,
 } from "./api.js";
@@ -31,6 +35,7 @@ export function renderAgentsModule(container) {
         <div class="tab" data-agent-tab="learning">学习路线</div>
         <div class="tab" data-agent-tab="projects">学习项目</div>
         <div class="tab" data-agent-tab="organization">整理计划</div>
+        <div class="tab" data-agent-tab="structure">结构蓝图</div>
       </div>
       <div id="agentContent"></div>
     </div>
@@ -47,6 +52,7 @@ export function renderAgentsModule(container) {
       if (tab.dataset.agentTab === "learning") renderLearningAgent(content);
       if (tab.dataset.agentTab === "projects") renderLearningProjectsAgent(content);
       if (tab.dataset.agentTab === "organization") renderOrganizationAgent(content);
+      if (tab.dataset.agentTab === "structure") renderFolderStructureAgent(content);
     });
   });
 
@@ -390,6 +396,58 @@ function renderLearningProjectDetail(project, el, reload) {
   document.getElementById("projectChatBtn").onclick = async () => { const text = document.getElementById("projectChatInput").value.trim(); if (text) renderLearningProjectDetail(await chatLearningProject(project.id, text), el, reload); };
   document.getElementById("reviewProjectBtn").onclick = async () => renderLearningProjectDetail(await reviewLearningProject(project.id), el, reload);
   document.getElementById("confirmReviewBtn")?.addEventListener("click", async () => renderLearningProjectDetail(await confirmLearningProjectReview(project.id, week), el, reload));
+}
+
+function renderFolderStructureAgent(el) {
+  el.innerHTML = `
+    <div class="agent-toolbar">
+      <input id="structureGoalInput" class="input" style="flex:1" value="按用途与主题重建收藏夹结构" />
+      <button id="structureBuildBtn" class="btn">生成结构蓝图</button>
+      <button id="structureHistoryBtn" class="btn btn-secondary">历史蓝图</button>
+    </div>
+    <div class="agent-hint">蓝图只读取本地收藏快照。确认后会保留审核队列，第一版不会直接移动或删除 B 站收藏。</div>
+    <div id="structureResult"></div>`;
+  const result = document.getElementById("structureResult");
+  const build = async () => {
+    const goal = document.getElementById("structureGoalInput").value.trim();
+    if (!goal) return showToast("请输入整理目标", "error");
+    try {
+      const button = document.getElementById("structureBuildBtn");
+      setButtonBusy(button, true, "构建中…");
+      result.innerHTML = loadingBlock("结构 Agent 正在把收藏归入用途和主题…");
+      renderFolderStructurePlan(await buildFolderStructurePlan(goal), result);
+    } catch (e) { showInlineMessage(result, formatError(e, "结构蓝图生成失败")); }
+    finally { setButtonBusy(document.getElementById("structureBuildBtn"), false); }
+  };
+  document.getElementById("structureBuildBtn").addEventListener("click", build);
+  document.getElementById("structureHistoryBtn").addEventListener("click", async () => {
+    try {
+      const data = await getFolderStructurePlans();
+      result.innerHTML = `<div class="agent-plan-list">${(data.plans || []).map(plan => `<div class="agent-plan-card"><div><strong>${escapeHtml(plan.goal)}</strong><p>${Number(plan.action_count)} 个目标文件夹</p></div><span class="agent-plan-status">${escapeHtml(plan.status)}</span></div>`).join("") || "<p class=\"muted\">暂无结构蓝图</p>"}</div>`;
+    } catch (e) { showInlineMessage(result, formatError(e, "历史蓝图加载失败")); }
+  });
+}
+
+function renderFolderStructurePlan(plan, el) {
+  const draft = plan.status === "draft";
+  const actions = plan.actions || [];
+  el.innerHTML = `<div class="agent-answer"><div class="agent-kicker">Folder Structure Agent</div><p><strong>${escapeHtml(plan.goal || "收藏夹结构蓝图")}</strong></p><small>${Number(plan.action_count || actions.length)} 个目标文件夹 · ${draft ? "等待审核" : "审核已确认"}</small></div>
+    <div class="structure-tree">${actions.map(action => {
+      const samples = (action.items || []).slice(0, 3);
+      return `<div class="structure-branch"><div class="structure-branch-head"><div><span class="structure-purpose">${escapeHtml(action.purpose)}</span><strong>${escapeHtml(action.topic)}</strong><small>${Number(action.item_count)} 条 · 置信度 ${Math.round(Number(action.confidence || 0) * 100)}%</small></div><span class="agent-plan-status">${action.review_state === "approved" ? "已保留" : action.review_state === "skipped" ? "已跳过" : "待审核"}</span></div><ul>${samples.map(item => `<li><a href="${escapeAttr(item.link || "#")}" target="_blank" rel="noopener">${escapeHtml(item.title || "未命名收藏")}</a><span>${escapeHtml(item.source_folder || "")}</span></li>`).join("")}</ul>${Number(action.item_count) > samples.length ? `<small>另有 ${Number(action.item_count) - samples.length} 条</small>` : ""}${draft ? `<div class="agent-plan-action-buttons"><button class="btn btn-secondary" data-structure-state="skipped" data-structure-id="${escapeAttr(action.id)}">跳过</button><button class="btn" data-structure-state="approved" data-structure-id="${escapeAttr(action.id)}">保留目标文件夹</button></div>` : ""}</div>`;
+    }).join("")}</div>${draft ? `<div class="agent-plan-footer"><button id="finalizeStructureBtn" class="btn">确认结构蓝图</button></div>` : ""}`;
+  if (draft) {
+    el.querySelectorAll("[data-structure-state]").forEach(button => button.addEventListener("click", async () => {
+      renderFolderStructurePlan(await updateFolderStructureAction(plan.id, button.dataset.structureId, button.dataset.structureState), el);
+    }));
+    document.getElementById("finalizeStructureBtn").addEventListener("click", async event => {
+      try {
+        setButtonBusy(event.currentTarget, true, "确认中…");
+        renderFolderStructurePlan(await finalizeFolderStructurePlan(plan.id), el);
+        showToast("结构蓝图已确认。远程移动将在接口验证后开放。", "success");
+      } catch (e) { showToast(formatError(e, "确认蓝图失败"), "error"); }
+    });
+  }
 }
 
 function renderOrganizationAgent(el) {

@@ -163,6 +163,17 @@ export function executeOrganizationPlan(planId) {
   return request(`/agents/organization-plans/${encodeURIComponent(planId)}/execute`, { method: "POST" });
 }
 
+export function buildFolderStructurePlan(goal) {
+  return request("/agents/folder-structure-plans", { method: "POST", body: JSON.stringify({ goal }) });
+}
+export function getFolderStructurePlans() { return request("/agents/folder-structure-plans"); }
+export function updateFolderStructureAction(planId, actionId, state) {
+  return request(`/agents/folder-structure-plans/${encodeURIComponent(planId)}/actions/${encodeURIComponent(actionId)}`, { method: "POST", body: JSON.stringify({ state }) });
+}
+export function finalizeFolderStructurePlan(planId) {
+  return request(`/agents/folder-structure-plans/${encodeURIComponent(planId)}/finalize`, { method: "POST" });
+}
+
 export function logout() {
   return request("/auth/logout", { method: "POST" });
 }

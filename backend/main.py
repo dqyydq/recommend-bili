@@ -29,7 +29,10 @@ from database import (
     mark_sync_required, record_operation, save_classification, search_favorites, set_plan_action_state,
     confirm_learning_week, confirm_weekly_review, create_learning_project, delete_learning_project,
     get_learning_project, list_learning_projects, update_learning_task,
+    finalize_folder_structure_plan, get_folder_structure_plan, list_folder_structure_plans,
+    set_folder_structure_action_state,
 )
+from folder_structure_agent import build_folder_structure_plan
 from learning_project_agent import build_project_review, build_project_week, chat_with_project
 from organization_executor import execute_organization_plan
 from sync_service import start_sync
@@ -155,6 +158,14 @@ class LearningTaskUpdateRequest(BaseModel):
 
 class LearningChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
+
+
+class FolderStructurePlanRequest(BaseModel):
+    goal: str = Field(default="按用途与主题重建收藏夹结构", min_length=1, max_length=500)
+
+
+class FolderStructureActionRequest(BaseModel):
+    state: str = Field(pattern="^(approved|skipped)$")
 
 
 @app.get("/api/settings")
@@ -648,6 +659,45 @@ async def api_organization_plan(req: OrganizationPlanRequest, session: dict = De
     except Exception as exc:
         print(f"[organization_plan] failed: {exc}")
         return {"error": "整理计划生成失败，请稍后重试"}
+
+
+@app.post("/api/agents/folder-structure-plans", dependencies=[Depends(require_trusted_origin)])
+async def api_folder_structure_plan(req: FolderStructurePlanRequest, session: dict = Depends(get_session)):
+    plan = await build_folder_structure_plan(session.get("uid", ""), req.goal)
+    if plan.get("error"):
+        return JSONResponse(plan, status_code=400)
+    await record_operation(session.get("uid", ""), "build_folder_structure_plan", {"plan_id": plan.get("id", ""), "actions": plan.get("action_count", 0)})
+    return plan
+
+
+@app.get("/api/agents/folder-structure-plans")
+async def api_folder_structure_plans(session: dict = Depends(get_session)):
+    return {"plans": await list_folder_structure_plans(session.get("uid", ""))}
+
+
+@app.get("/api/agents/folder-structure-plans/{plan_id}")
+async def api_folder_structure_plan_detail(plan_id: str, session: dict = Depends(get_session)):
+    plan = await get_folder_structure_plan(session.get("uid", ""), plan_id)
+    if plan is None:
+        return JSONResponse({"error": "结构蓝图不存在"}, status_code=404)
+    return plan
+
+
+@app.post("/api/agents/folder-structure-plans/{plan_id}/actions/{action_id}", dependencies=[Depends(require_trusted_origin)])
+async def api_folder_structure_action(plan_id: str, action_id: str, req: FolderStructureActionRequest, session: dict = Depends(get_session)):
+    plan = await set_folder_structure_action_state(session.get("uid", ""), plan_id, action_id, req.state)
+    if plan is None:
+        return JSONResponse({"error": "目标文件夹不存在或蓝图已确认"}, status_code=409)
+    return plan
+
+
+@app.post("/api/agents/folder-structure-plans/{plan_id}/finalize", dependencies=[Depends(require_trusted_origin)])
+async def api_finalize_folder_structure_plan(plan_id: str, session: dict = Depends(get_session)):
+    plan = await finalize_folder_structure_plan(session.get("uid", ""), plan_id)
+    if plan is None:
+        return JSONResponse({"error": "蓝图不存在或已确认"}, status_code=409)
+    await record_operation(session.get("uid", ""), "review_folder_structure_plan", {"plan_id": plan_id})
+    return plan
 
 
 @app.get("/api/agents/organization-plans")

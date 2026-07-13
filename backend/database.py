@@ -188,6 +188,33 @@ CREATE TABLE IF NOT EXISTS learning_weekly_reviews (
     confirmed_at TIMESTAMPTZ,
     UNIQUE (project_id, week_number)
 );
+
+CREATE TABLE IF NOT EXISTS folder_structure_plans (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+    goal TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('draft', 'reviewed', 'cancelled')) DEFAULT 'draft',
+    action_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS folder_structure_plans_uid_created_idx ON folder_structure_plans(uid, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS folder_structure_actions (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL REFERENCES folder_structure_plans(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    purpose TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    destination_name TEXT NOT NULL,
+    item_count INTEGER NOT NULL,
+    confidence REAL NOT NULL,
+    items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    review_state TEXT NOT NULL CHECK (review_state IN ('pending', 'approved', 'skipped')) DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (plan_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS folder_structure_actions_plan_idx ON folder_structure_actions(plan_id, sequence);
 """
 
 
@@ -785,3 +812,68 @@ async def confirm_weekly_review(uid: str, project_id: str, week_number: int) -> 
             await conn.execute("UPDATE learning_weekly_reviews SET status = 'confirmed', confirmed_at = NOW() WHERE id = $1", review["id"])
             await conn.execute("UPDATE learning_projects SET current_week = $3, updated_at = NOW() WHERE uid = $1 AND id = $2", uid, project_id, week_number + 1)
     return await get_learning_project(uid, project_id)
+
+
+async def create_folder_structure_plan(uid: str, goal: str, actions: list[dict[str, Any]]) -> dict[str, Any]:
+    plan_id = secrets.token_urlsafe(12)
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO folder_structure_plans (id, uid, goal, action_count) VALUES ($1,$2,$3,$4)",
+                plan_id, uid, goal, len(actions),
+            )
+            if actions:
+                await conn.executemany(
+                    "INSERT INTO folder_structure_actions (id, plan_id, sequence, purpose, topic, destination_name, item_count, confidence, items) "
+                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)",
+                    [(secrets.token_urlsafe(12), plan_id, index, action["purpose"], action["topic"], action["destination_name"],
+                      action["item_count"], action["confidence"], json.dumps(action["items"], ensure_ascii=False))
+                     for index, action in enumerate(actions, start=1)],
+                )
+    return await get_folder_structure_plan(uid, plan_id) or {}
+
+
+async def get_folder_structure_plan(uid: str, plan_id: str) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        plan = await conn.fetchrow("SELECT id, goal, status, action_count, created_at, updated_at FROM folder_structure_plans WHERE uid = $1 AND id = $2", uid, plan_id)
+        if plan is None:
+            return None
+        rows = await conn.fetch(
+            "SELECT id, sequence, purpose, topic, destination_name, item_count, confidence, items, review_state "
+            "FROM folder_structure_actions WHERE plan_id = $1 ORDER BY sequence", plan_id,
+        )
+    data = dict(plan)
+    data["actions"] = [{**dict(row), "items": _json_value(row["items"])} for row in rows]
+    return data
+
+
+async def list_folder_structure_plans(uid: str, limit: int = 20) -> list[dict[str, Any]]:
+    async with pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, goal, status, action_count, created_at, updated_at FROM folder_structure_plans "
+            "WHERE uid = $1 ORDER BY created_at DESC LIMIT $2", uid, limit,
+        )
+    return [dict(row) for row in rows]
+
+
+async def set_folder_structure_action_state(uid: str, plan_id: str, action_id: str, state: str) -> dict[str, Any] | None:
+    if state not in {'approved', 'skipped'}:
+        raise ValueError("invalid structure action state")
+    async with pool().acquire() as conn:
+        result = await conn.execute(
+            "UPDATE folder_structure_actions action SET review_state = $4 FROM folder_structure_plans plan "
+            "WHERE action.plan_id = plan.id AND plan.uid = $1 AND action.plan_id = $2 AND action.id = $3 AND plan.status = 'draft'",
+            uid, plan_id, action_id, state,
+        )
+        if result.endswith("1"):
+            await conn.execute("UPDATE folder_structure_plans SET updated_at = NOW() WHERE id = $1", plan_id)
+    return await get_folder_structure_plan(uid, plan_id) if result.endswith("1") else None
+
+
+async def finalize_folder_structure_plan(uid: str, plan_id: str) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        result = await conn.execute(
+            "UPDATE folder_structure_plans SET status = 'reviewed', updated_at = NOW() WHERE uid = $1 AND id = $2 AND status = 'draft'",
+            uid, plan_id,
+        )
+    return await get_folder_structure_plan(uid, plan_id) if result.endswith("1") else None
