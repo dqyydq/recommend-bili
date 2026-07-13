@@ -1,4 +1,4 @@
-const BASE = "http://localhost:8000/api";
+const BASE = import.meta.env.VITE_API_BASE || "/api";
 
 async function request(path, options = {}) {
   const resp = await fetch(`${BASE}${path}`, {
@@ -79,6 +79,17 @@ export function addToFavorite(bvid, folderId) {
     method: "POST",
     body: JSON.stringify({ bvid, folder_id: folderId }),
   });
+}
+
+export function startSync(force = false) {
+  return request("/sync", {
+    method: "POST",
+    body: JSON.stringify({ force }),
+  });
+}
+
+export function getSyncStatus() {
+  return request("/sync/status");
 }
 
 export function analyzeProfile() {

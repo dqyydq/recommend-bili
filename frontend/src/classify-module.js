@@ -1,7 +1,7 @@
 import { getFolders } from "./api.js";
 import { escapeAttr, escapeHtml, showInlineMessage } from "./ui.js";
 
-const SSE_BASE = "http://localhost:8000/api/analyze";
+const SSE_BASE = "/api/analyze";
 
 export async function renderClassifyModule(container) {
   container.innerHTML = `

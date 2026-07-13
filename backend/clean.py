@@ -3,7 +3,7 @@ import time
 
 import httpx
 
-from bili import _client, fetch_all_items
+from bili import _client
 
 BATCH = 12
 INVALID_CODES = {-404}
@@ -32,13 +32,12 @@ async def _check_bvid(bvid: str, client: httpx.AsyncClient) -> str:
 
 async def scan_invalid(
     cookies: dict,
-    uid: str,
+    items: list[dict],
     on_progress=None,
 ) -> dict:
     """Scan favorites without treating rate limits or network failures as invalid videos."""
     started_at = time.time()
-    all_items = await fetch_all_items(uid, cookies)
-    total = len(all_items)
+    total = len(items)
     if total == 0:
         return {"invalid": [], "unknown": [], "checked": 0}
 
@@ -62,7 +61,7 @@ async def scan_invalid(
                 if on_progress and (checked % 10 == 0 or checked == total):
                     await on_progress(total, checked, len(invalid), len(unknown))
 
-        await asyncio.gather(*(verify(item) for item in all_items))
+        await asyncio.gather(*(verify(item) for item in items))
 
     elapsed = time.time() - started_at
     print(f"[clean] checked={checked} invalid={len(invalid)} unknown={len(unknown)} elapsed={elapsed:.1f}s")

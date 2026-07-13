@@ -19,15 +19,29 @@ from agents import (
     semantic_search_favorites,
 )
 from auth import COOKIE_SECURE, delete_session, generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool, on_session_updated
-from bili import fetch_fav_folders, fetch_fav_items, fetch_all_items, search_all, add_favorite, _client
+from bili import search_all, add_favorite, _client
 from classifier import classify_favorites
 from clean import _check_bvid, scan_invalid
-from storage import save as storage_save, list_history as storage_list, load as storage_load
+from database import (
+    close_db, get_favorites, get_folders, init_db, list_classifications,
+    load_classification, mark_sync_required, record_operation, save_classification, search_favorites,
+)
+from sync_service import start_sync
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
 ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def startup_database() -> None:
+    await init_db()
+
+
+@app.on_event("shutdown")
+async def shutdown_database() -> None:
+    await close_db()
 
 
 app.add_middleware(
@@ -56,6 +70,15 @@ async def auth_qrcode():
 async def auth_poll(key: str):
     result = await poll_qrcode(key)
     if result.get("session_id"):
+        session = sessions[result["session_id"]]
+        sync = await start_sync(
+            session["uid"],
+            session.get("bili_cookies", {}),
+            session.get("nickname", ""),
+            session.get("avatar", ""),
+            force=True,
+        )
+        result["sync_job"] = sync
         resp = JSONResponse(result)
         resp.set_cookie(
             key="session_id",
@@ -130,12 +153,33 @@ async def settings_model(req: ModelRequest, session: dict = Depends(get_session)
 
 # ---------- B站数据 ----------
 
+class SyncRequest(BaseModel):
+    force: bool = False
+
+
+@app.post("/api/sync", dependencies=[Depends(require_trusted_origin)])
+async def api_sync(req: SyncRequest, session: dict = Depends(get_session)):
+    return await start_sync(
+        session.get("uid", ""),
+        session.get("bili_cookies", {}),
+        session.get("nickname", ""),
+        session.get("avatar", ""),
+        force=req.force,
+    )
+
+
+@app.get("/api/sync/status")
+async def api_sync_status(session: dict = Depends(get_session)):
+    from database import get_sync_job, get_sync_state
+
+    uid = session.get("uid", "")
+    return {"state": await get_sync_state(uid), "job": await get_sync_job(uid)}
+
 @app.get("/api/folders")
 async def api_folders(session: dict = Depends(get_session)):
     try:
-        cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
-        folders = await fetch_fav_folders(uid, cookies)
+        folders = await get_folders(uid)
         session["folders"] = folders
         return {"folders": folders}
     except Exception as e:
@@ -145,8 +189,7 @@ async def api_folders(session: dict = Depends(get_session)):
 @app.get("/api/favorites")
 async def api_favorites(folder_id: int, session: dict = Depends(get_session)):
     try:
-        cookies = session.get("bili_cookies", {})
-        items = await fetch_fav_items(folder_id, cookies)
+        items = await get_favorites(session.get("uid", ""), folder_id)
         return {"items": items}
     except Exception as e:
         return {"error": str(e)}
@@ -164,45 +207,14 @@ async def api_analyze(request: Request, folder_id: int | None = None, session: d
     async def event_stream():
         try:
             if folder_id:
-                items = await fetch_fav_items(folder_id, cookies)
-                all_items = items
-                yield f"event: progress\ndata: {json.dumps({'folder_name': '当前收藏夹', 'folder_count': len(items), 'total_collected': len(all_items)})}\n\n"
+                all_items = await get_favorites(uid, folder_id)
+                yield f"event: progress\ndata: {json.dumps({'folder_name': '当前收藏夹', 'folder_count': len(all_items), 'total_collected': len(all_items)})}\n\n"
             else:
-                folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
-                session["folders"] = folders
-                if not folders:
-                    yield f"event: error\ndata: {json.dumps({'error': '未找到收藏夹'})}\n\n"
-                    return
-
-                queue: asyncio.Queue = asyncio.Queue()
-
-                async def on_progress(title: str, count: int, total: int):
-                    await queue.put(
-                        f"event: progress\ndata: {json.dumps({'folder_name': title, 'folder_count': count, 'total_collected': total})}\n\n"
-                    )
-
-                fetch_task = asyncio.create_task(
-                    fetch_all_items(uid, cookies, folders=folders, on_progress=on_progress)
-                )
-
-                while not fetch_task.done():
-                    try:
-                        msg = await asyncio.wait_for(queue.get(), timeout=0.15)
-                        yield msg
-                    except asyncio.TimeoutError:
-                        pass
-
-                # 排空残留的进度事件
-                try:
-                    while True:
-                        yield queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-
-                all_items = fetch_task.result()
+                all_items = await get_favorites(uid)
+                yield f"event: progress\ndata: {json.dumps({'folder_name': '本地收藏快照', 'folder_count': len(all_items), 'total_collected': len(all_items)})}\n\n"
 
             if not all_items:
-                yield f"event: error\ndata: {json.dumps({'error': '收藏夹为空'})}\n\n"
+                yield f"event: error\ndata: {json.dumps({'error': '本地收藏快照为空，请先执行同步'})}\n\n"
                 return
 
             yield f"event: classifying\ndata: {json.dumps({'total': len(all_items)})}\n\n"
@@ -229,31 +241,10 @@ async def api_dust(request: Request, session: dict = Depends(get_session)):
     async def event_stream():
         try:
             yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': 0})}\n\n"
-            folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
-            session["folders"] = folders
-            if not folders:
-                yield f"event: error\ndata: {json.dumps({'error': '未找到收藏夹'})}\n\n"
+            all_items = await get_favorites(uid)
+            if not all_items:
+                yield f"event: error\ndata: {json.dumps({'error': '本地收藏快照为空，请先执行同步'})}\n\n"
                 return
-
-            # 收藏夹抓取阶段：通过队列桥接 on_progress → SSE
-            fav_queue: asyncio.Queue = asyncio.Queue()
-
-            async def on_fav_progress(title, count, total):
-                await fav_queue.put(total)
-
-            fetch_task = asyncio.create_task(
-                fetch_all_items(uid, cookies, folders=folders, on_progress=on_fav_progress)
-            )
-
-            last_fav = 0
-            while not fetch_task.done():
-                try:
-                    last_fav = await asyncio.wait_for(fav_queue.get(), timeout=0.3)
-                    yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': last_fav})}\n\n"
-                except asyncio.TimeoutError:
-                    pass
-
-            all_items = fetch_task.result()
             yield f"event: progress\ndata: {json.dumps({'phase': 'favorites', 'count': len(all_items)})}\n\n"
 
             now = time.time()
@@ -321,7 +312,8 @@ async def api_clean_scan(request: Request, session: dict = Depends(get_session))
 
             async def do_scan():
                 try:
-                    result = await scan_invalid(cookies, uid, on_progress=on_progress)
+                    items = await get_favorites(uid)
+                    result = await scan_invalid(cookies, items, on_progress=on_progress)
                     await queue.put({"done": True, "result": result})
                 except Exception as exc:
                     await queue.put({"done": True, "error": "扫描失败，请稍后重试"})
@@ -397,6 +389,9 @@ async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_sessi
                 if data.get("code") == 0:
                     removed_total += len(items)
 
+        if removed_total:
+            await mark_sync_required(session.get("uid", ""))
+            await record_operation(session.get("uid", ""), "remove_invalid_favorites", {"removed": removed_total})
         return {"removed": removed_total, "skipped": skipped_total, "total": len(req.items)}
     except Exception as e:
         return {"error": str(e)}
@@ -405,12 +400,7 @@ async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_sessi
 @app.post("/api/classify/save", dependencies=[Depends(require_trusted_origin)])
 async def api_classify_save(req: SaveRequest, session: dict = Depends(get_session)):
     try:
-        payload = {
-            "folder_name": req.folder_name,
-            "total": sum(len(c.get("items", [])) for c in req.categories),
-            "categories": req.categories,
-        }
-        filename = storage_save(session.get("uid", ""), payload)
+        filename = await save_classification(session.get("uid", ""), req.folder_name, req.categories)
         return {"success": True, "filename": filename}
     except Exception as e:
         return {"error": str(e)}
@@ -419,7 +409,7 @@ async def api_classify_save(req: SaveRequest, session: dict = Depends(get_sessio
 @app.get("/api/classify/history")
 async def api_classify_history(session: dict = Depends(get_session)):
     try:
-        return {"history": storage_list(session.get("uid", ""))}
+        return {"history": await list_classifications(session.get("uid", ""))}
     except Exception as e:
         return {"error": str(e)}
 
@@ -427,7 +417,7 @@ async def api_classify_history(session: dict = Depends(get_session)):
 @app.get("/api/classify/load")
 async def api_classify_load(file: str, session: dict = Depends(get_session)):
     try:
-        data = storage_load(session.get("uid", ""), file)
+        data = await load_classification(session.get("uid", ""), file)
         if data is None:
             return {"error": "文件不存在"}
         return data
@@ -440,11 +430,8 @@ async def api_classify_load(file: str, session: dict = Depends(get_session)):
 @app.get("/api/search/favorites")
 async def api_search_favorites(q: str = "", session: dict = Depends(get_session)):
     try:
-        cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
-        all_items = await fetch_all_items(uid, cookies)
-        results = [item for item in all_items
-                   if q.lower() in item["title"].lower() or q.lower() in item.get("intro", "").lower()]
+        results = await search_favorites(uid, q)
         return {"results": results, "total": len(results)}
     except Exception as e:
         return {"error": str(e)}
@@ -469,6 +456,9 @@ async def api_favorites_add(req: AddFavoriteRequest, session: dict = Depends(get
     try:
         cookies = session.get("bili_cookies", {})
         result = await add_favorite(req.bvid, req.folder_id, cookies)
+        if result.get("success"):
+            await mark_sync_required(session.get("uid", ""))
+            await record_operation(session.get("uid", ""), "add_favorite", {"bvid": req.bvid, "folder_id": req.folder_id})
         return result
     except Exception as e:
         return {"error": str(e)}
@@ -481,7 +471,7 @@ async def api_agent_dashboard(session: dict = Depends(get_session)):
     try:
         cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
-        folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+        folders = await get_folders(uid)
         session["folders"] = folders
         return await build_knowledge_dashboard(uid, cookies, folders=folders)
     except Exception as e:
@@ -495,7 +485,7 @@ async def api_agent_profile(session: dict = Depends(get_session)):
     try:
         cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
-        folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+        folders = await get_folders(uid)
         session["folders"] = folders
         model = session.get("model", "deepseek-v4-flash")
         return await analyze_favorite_profile(uid, cookies, api_key, model, folders=folders)
@@ -511,7 +501,7 @@ async def api_agent_learning_path(req: LearningPathRequest, session: dict = Depe
     try:
         cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
-        folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+        folders = await get_folders(uid)
         session["folders"] = folders
         model = session.get("model", "deepseek-v4-flash")
         return await build_learning_path(
@@ -532,7 +522,7 @@ async def api_agent_search_index(session: dict = Depends(get_session)):
     try:
         cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
-        folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+        folders = await get_folders(uid)
         session["folders"] = folders
         return await rebuild_favorite_index(uid, cookies, folders=folders)
     except Exception as e:
@@ -547,7 +537,7 @@ async def api_agent_search(req: SemanticSearchRequest, session: dict = Depends(g
     try:
         cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
-        folders = session.get("folders") or await fetch_fav_folders(uid, cookies)
+        folders = await get_folders(uid)
         session["folders"] = folders
         model = session.get("model", "deepseek-v4-flash")
         return await semantic_search_favorites(

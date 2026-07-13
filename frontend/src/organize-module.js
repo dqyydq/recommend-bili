@@ -1,6 +1,6 @@
 import { escapeAttr, escapeHtml, formatError, setButtonBusy, showInlineMessage, showToast } from "./ui.js";
 
-const BASE = "http://localhost:8000/api";
+const BASE = "/api";
 const ANALYZE_URL = `${BASE}/analyze`;
 const SCAN_URL = `${BASE}/clean/scan`;
 const REMOVE_URL = `${BASE}/clean/remove`;

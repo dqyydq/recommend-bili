@@ -1,6 +1,6 @@
 import { escapeAttr, escapeHtml, showInlineMessage } from "./ui.js";
 
-const DUST_URL = "http://localhost:8000/api/dust";
+const DUST_URL = "/api/dust";
 
 const LABELS = {
   dust: { text: "吃灰", color: "#f43f5e" },

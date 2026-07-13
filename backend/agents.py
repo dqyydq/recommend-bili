@@ -6,8 +6,8 @@ from collections import Counter
 
 from openai import AsyncOpenAI
 
-from bili import fetch_all_items, fetch_fav_folders
 from classifier import DEEPSEEK_BASE_URL
+from database import get_favorites, get_folders
 from embedding import embedding_collection_suffix, get_embeddings
 
 CHROMA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "chroma"))
@@ -173,8 +173,8 @@ async def build_knowledge_dashboard(uid: str, cookies: dict, folders: list[dict]
 
 async def fetch_session_items(uid: str, cookies: dict, folders: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
     if folders is None:
-        folders = await fetch_fav_folders(uid, cookies)
-    items = await fetch_all_items(uid, cookies, folders=folders)
+        folders = await get_folders(uid)
+    items = await get_favorites(uid)
     return items, folders
 
 
@@ -318,8 +318,9 @@ async def semantic_search_favorites(
     collection = _get_chroma_collection(uid)
     count = collection.count()
     if refresh or count == 0:
-        index_info = await rebuild_favorite_index(uid, cookies, folders)
-        count = index_info["indexed"]
+        await rebuild_favorite_index(uid, cookies, folders)
+        collection = _get_chroma_collection(uid)
+        count = collection.count()
 
     if count == 0:
         return {"answer": "收藏夹为空，暂时没有可检索的内容。", "results": [], "indexed": 0}

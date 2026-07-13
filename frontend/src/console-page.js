@@ -1,4 +1,4 @@
-import { logout, setApiKey, setModel, getSettings } from "./api.js";
+import { getSyncStatus, logout, setApiKey, setModel, getSettings, startSync } from "./api.js";
 import { renderClassifyModule } from "./classify-module.js";
 import { renderSearchModule } from "./search-module.js";
 import { renderDustModule } from "./dust-module.js";
@@ -23,6 +23,8 @@ export function renderConsole(app, user) {
           <div class="user-info">
             <img src="${escapeAttr(user.avatar || '')}" alt="" onerror="this.style.display='none'" />
             <span>${escapeHtml(user.nickname || "用户")}</span>
+            <button id="syncBtn" class="logout-btn" title="同步收藏夹">同步</button>
+            <span id="syncStatus" style="font-size:12px;color:#777;"></span>
             <button id="settingsBtn" class="logout-btn" title="设置" style="font-size:16px;">&#9881;</button>
             <button id="logoutBtn" class="logout-btn">退出</button>
           </div>
@@ -57,6 +59,42 @@ export function renderConsole(app, user) {
     try { await logout(); } catch (e) {}
     location.reload();
   });
+
+  const syncBtn = document.getElementById("syncBtn");
+  const syncStatus = document.getElementById("syncStatus");
+
+  async function refreshSyncStatus() {
+    try {
+      const data = await getSyncStatus();
+      const job = data.job;
+      if (!job) {
+        syncStatus.textContent = "未同步";
+        return;
+      }
+      if (job.status === "queued" || job.status === "running") {
+        syncBtn.disabled = true;
+        syncStatus.textContent = `同步中 ${job.folders_processed || 0}/${job.folders_total || 0}`;
+        setTimeout(refreshSyncStatus, 1500);
+        return;
+      }
+      syncBtn.disabled = false;
+      syncStatus.textContent = job.status === "completed" ? "已同步" : "同步失败";
+    } catch (_) {
+      syncStatus.textContent = "同步状态不可用";
+    }
+  }
+
+  syncBtn.addEventListener("click", async () => {
+    try {
+      setButtonBusy(syncBtn, true, "同步中…");
+      await startSync(false);
+      refreshSyncStatus();
+    } catch (e) {
+      showToast(`同步失败: ${e.message}`, "error");
+      setButtonBusy(syncBtn, false);
+    }
+  });
+  refreshSyncStatus();
 
   // 设置弹窗
   document.getElementById("settingsBtn").addEventListener("click", () => showSettingsModal());
