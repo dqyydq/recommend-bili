@@ -1,58 +1,60 @@
 import json
-import os
 from datetime import datetime
+from pathlib import Path
+from uuid import uuid4
 
-BASE_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "classifications")
-
-
-def _ensure_dir():
-    os.makedirs(BASE_DIR, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent.parent / "data" / "classifications"
 
 
-def save(data: dict) -> str:
-    _ensure_dir()
+def _user_dir(uid: str) -> Path:
+    if not uid.isdigit():
+        raise ValueError("invalid user id")
+    path = (BASE_DIR / uid).resolve()
+    if BASE_DIR.resolve() not in path.parents:
+        raise ValueError("invalid storage path")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def save(uid: str, data: dict) -> str:
+    user_dir = _user_dir(uid)
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    filename = f"{ts}.json"
+    filename = f"{ts}_{uuid4().hex[:8]}.json"
     payload = {
         "created_at": datetime.now().isoformat(),
         "folder_name": data.get("folder_name", "全部收藏夹"),
         "total": data.get("total", 0),
         "categories": data.get("categories", []),
     }
-    path = os.path.join(BASE_DIR, filename)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    with (user_dir / filename).open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
     return filename
 
 
-def list_history() -> list[dict]:
-    if not os.path.isdir(BASE_DIR):
-        return []
-    files = sorted(os.listdir(BASE_DIR), reverse=True)
+def list_history(uid: str) -> list[dict]:
+    user_dir = _user_dir(uid)
     result = []
-    for fn in files:
-        if not fn.endswith(".json"):
-            continue
-        path = os.path.join(BASE_DIR, fn)
+    for path in sorted(user_dir.glob("*.json"), reverse=True):
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                d = json.load(f)
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
             result.append({
-                "filename": fn,
-                "created_at": d.get("created_at", ""),
-                "total": d.get("total", 0),
-                "categories_count": len(d.get("categories", [])),
+                "filename": path.name,
+                "created_at": data.get("created_at", ""),
+                "total": data.get("total", 0),
+                "categories_count": len(data.get("categories", [])),
             })
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             continue
     return result
 
 
-def load(filename: str) -> dict | None:
-    if ".." in filename or "/" in filename:
+def load(uid: str, filename: str) -> dict | None:
+    if Path(filename).name != filename or not filename.endswith(".json"):
         return None
-    path = os.path.join(BASE_DIR, filename)
-    if not os.path.isfile(path):
+    user_dir = _user_dir(uid)
+    path = (user_dir / filename).resolve()
+    if path.parent != user_dir or not path.is_file():
         return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)

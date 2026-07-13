@@ -8,6 +8,7 @@ dist/
 .vite/
 *.egg-info/
 .env
+data/
 CLAUDE.md
 .claude/
 docs/

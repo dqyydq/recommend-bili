@@ -6,7 +6,7 @@ import time
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agents import (
     analyze_favorite_profile,
@@ -15,24 +15,31 @@ from agents import (
     rebuild_favorite_index,
     semantic_search_favorites,
 )
-from auth import generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool, on_session_updated
+from auth import COOKIE_SECURE, delete_session, generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool, on_session_updated
 from bili import fetch_fav_folders, fetch_fav_items, fetch_all_items, search_all, add_favorite, _client
 from classifier import classify_favorites
-from clean import scan_invalid
+from clean import _check_bvid, scan_invalid
 from storage import save as storage_save, list_history as storage_list, load as storage_load
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
 
 app = FastAPI()
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def require_trusted_origin(request: Request) -> None:
+    origin = request.headers.get("origin")
+    if origin and origin not in ALLOWED_ORIGINS:
+        raise HTTPException(status_code=403, detail="不受信任的请求来源")
 
 # ---------- 登录 ----------
 
@@ -53,6 +60,8 @@ async def auth_poll(key: str):
             httponly=True,
             max_age=86400 * 7,
             samesite="lax",
+            secure=COOKIE_SECURE,
+            path="/",
         )
         return resp
     return result
@@ -74,42 +83,42 @@ async def me(request: Request):
 
 
 class KeyRequest(BaseModel):
-    api_key: str
+    api_key: str = Field(min_length=8, max_length=256)
 
 
 class ModelRequest(BaseModel):
-    model: str
+    model: str = Field(min_length=1, max_length=100)
 
 
 class SemanticSearchRequest(BaseModel):
-    q: str
-    top_k: int = 8
+    q: str = Field(min_length=1, max_length=500)
+    top_k: int = Field(default=8, ge=1, le=20)
     refresh: bool = False
 
 
 class LearningPathRequest(BaseModel):
-    goal: str
+    goal: str = Field(min_length=1, max_length=500)
     refresh: bool = False
 
 
 @app.get("/api/settings")
 async def api_settings(session: dict = Depends(get_session)):
     key = session.get("deepseek_key", "")
-    masked = key if len(key) <= 8 else key[:4] + "*" * (len(key) - 8) + key[-4:]
+    masked = "*" * 8 if key and len(key) <= 8 else (key[:4] + "*" * 8 + key[-4:] if key else "")
     return {
         "api_key": masked,
         "model": session.get("model", "deepseek-v4-flash"),
     }
 
 
-@app.post("/api/settings/key")
+@app.post("/api/settings/key", dependencies=[Depends(require_trusted_origin)])
 async def settings_key(req: KeyRequest, session: dict = Depends(get_session)):
     session["deepseek_key"] = req.api_key
     on_session_updated(session)
     return {"success": True}
 
 
-@app.post("/api/settings/model")
+@app.post("/api/settings/model", dependencies=[Depends(require_trusted_origin)])
 async def settings_model(req: ModelRequest, session: dict = Depends(get_session)):
     session["model"] = req.model
     on_session_updated(session)
@@ -304,20 +313,27 @@ async def api_clean_scan(request: Request, session: dict = Depends(get_session))
         try:
             queue: asyncio.Queue = asyncio.Queue()
 
-            async def on_progress(total: int, checked: int, invalid_count: int):
-                await queue.put({"checked": checked, "total": total, "invalid": invalid_count})
+            async def on_progress(total: int, checked: int, invalid_count: int, unknown_count: int):
+                await queue.put({"checked": checked, "total": total, "invalid": invalid_count, "unknown": unknown_count})
 
             async def do_scan():
-                result = await scan_invalid(cookies, uid, on_progress=on_progress)
-                await queue.put({"done": True, "result": result})
+                try:
+                    result = await scan_invalid(cookies, uid, on_progress=on_progress)
+                    await queue.put({"done": True, "result": result})
+                except Exception as exc:
+                    await queue.put({"done": True, "error": "扫描失败，请稍后重试"})
+                    print(f"[clean] scan failed: {exc}")
 
             asyncio.create_task(do_scan())
 
             while True:
                 msg = await queue.get()
                 if msg.get("done"):
+                    if msg.get("error"):
+                        yield f"event: error\ndata: {json.dumps({'error': msg['error']})}\n\n"
+                        break
                     result = msg["result"]
-                    yield f"event: result\ndata: {json.dumps({'invalid': result, 'total': len(result)})}\n\n"
+                    yield f"event: result\ndata: {json.dumps(result)}\n\n"
                     break
                 yield f"event: progress\ndata: {json.dumps(msg)}\n\n"
 
@@ -330,16 +346,16 @@ async def api_clean_scan(request: Request, session: dict = Depends(get_session))
 
 
 class RemoveItem(BaseModel):
-    bvid: str
-    folder_id: int
-    media_id: int = 0
+    bvid: str = Field(min_length=1, max_length=32)
+    folder_id: int = Field(gt=0)
+    media_id: int = Field(gt=0)
 
 
 class RemoveRequest(BaseModel):
-    items: list[RemoveItem]
+    items: list[RemoveItem] = Field(min_length=1, max_length=100)
 
 
-@app.post("/api/clean/remove")
+@app.post("/api/clean/remove", dependencies=[Depends(require_trusted_origin)])
 async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_session)):
     try:
         cookies = session.get("bili_cookies", {})
@@ -347,14 +363,18 @@ async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_sessi
         if not csrf:
             return {"error": "缺少 bili_jct (csrf) cookie"}
 
-        # 按收藏夹分组
+        # Re-check every candidate: client input must never be enough to delete a favorite.
         items_by_folder: dict[int, list[RemoveItem]] = {}
-        for item in req.items:
-            if item.media_id:
-                items_by_folder.setdefault(item.folder_id, []).append(item)
-
         removed_total = 0
+        skipped_total = 0
         async with _client(cookies) as client:
+            statuses = await asyncio.gather(*(_check_bvid(item.bvid, client) for item in req.items))
+            for item, status in zip(req.items, statuses):
+                if status == "invalid":
+                    items_by_folder.setdefault(item.folder_id, []).append(item)
+                else:
+                    skipped_total += 1
+
             for folder_id, items in items_by_folder.items():
                 resources = ",".join(f"{item.media_id}:2" for item in items)
                 resp = await client.post(
@@ -374,12 +394,12 @@ async def api_clean_remove(req: RemoveRequest, session: dict = Depends(get_sessi
                 if data.get("code") == 0:
                     removed_total += len(items)
 
-        return {"removed": removed_total, "total": len(req.items)}
+        return {"removed": removed_total, "skipped": skipped_total, "total": len(req.items)}
     except Exception as e:
         return {"error": str(e)}
 
 
-@app.post("/api/classify/save")
+@app.post("/api/classify/save", dependencies=[Depends(require_trusted_origin)])
 async def api_classify_save(req: SaveRequest, session: dict = Depends(get_session)):
     try:
         payload = {
@@ -387,7 +407,7 @@ async def api_classify_save(req: SaveRequest, session: dict = Depends(get_sessio
             "total": sum(len(c.get("items", [])) for c in req.categories),
             "categories": req.categories,
         }
-        filename = storage_save(payload)
+        filename = storage_save(session.get("uid", ""), payload)
         return {"success": True, "filename": filename}
     except Exception as e:
         return {"error": str(e)}
@@ -396,7 +416,7 @@ async def api_classify_save(req: SaveRequest, session: dict = Depends(get_sessio
 @app.get("/api/classify/history")
 async def api_classify_history(session: dict = Depends(get_session)):
     try:
-        return {"history": storage_list()}
+        return {"history": storage_list(session.get("uid", ""))}
     except Exception as e:
         return {"error": str(e)}
 
@@ -404,7 +424,7 @@ async def api_classify_history(session: dict = Depends(get_session)):
 @app.get("/api/classify/load")
 async def api_classify_load(file: str, session: dict = Depends(get_session)):
     try:
-        data = storage_load(file)
+        data = storage_load(session.get("uid", ""), file)
         if data is None:
             return {"error": "文件不存在"}
         return data
@@ -441,7 +461,7 @@ class AddFavoriteRequest(BaseModel):
     folder_id: int | None = None
 
 
-@app.post("/api/favorites/add")
+@app.post("/api/favorites/add", dependencies=[Depends(require_trusted_origin)])
 async def api_favorites_add(req: AddFavoriteRequest, session: dict = Depends(get_session)):
     try:
         cookies = session.get("bili_cookies", {})
@@ -504,7 +524,7 @@ async def api_agent_learning_path(req: LearningPathRequest, session: dict = Depe
         return {"error": str(e)}
 
 
-@app.post("/api/agents/search/index")
+@app.post("/api/agents/search/index", dependencies=[Depends(require_trusted_origin)])
 async def api_agent_search_index(session: dict = Depends(get_session)):
     try:
         cookies = session.get("bili_cookies", {})
@@ -543,13 +563,13 @@ async def api_agent_search(req: SemanticSearchRequest, session: dict = Depends(g
 
 # ---------- 退出 ----------
 
-@app.post("/api/auth/logout")
+@app.post("/api/auth/logout", dependencies=[Depends(require_trusted_origin)])
 async def auth_logout(request: Request):
     session_id = request.cookies.get("session_id")
     if session_id:
-        sessions.pop(session_id, None)
+        delete_session(session_id)
     resp = JSONResponse({"success": True})
-    resp.delete_cookie("session_id")
+    resp.delete_cookie("session_id", path="/")
     return resp
 
 

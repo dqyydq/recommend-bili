@@ -1,11 +1,15 @@
+import base64
+import io
 import json
 import os
 import secrets
 import time
-import urllib.parse
 
 import httpx
+import qrcode
 from fastapi import Request, HTTPException
+
+from security import load_encrypted_json, persistence_enabled, save_encrypted_json
 
 BILI_PASSPORT = "https://passport.bilibili.com"
 BILI_HEADERS = {
@@ -18,52 +22,65 @@ sessions: dict[str, dict] = {}
 qrcode_pool: dict[str, dict] = {}
 
 SID_LEN = 32
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", str(86400 * 7)))
+_cookie_secure_value = os.getenv("COOKIE_SECURE") or ("true" if os.getenv("APP_ENV") == "production" else "false")
+COOKIE_SECURE = _cookie_secure_value.lower() in {"1", "true", "yes"}
+QR_TTL_SECONDS = 300
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
-SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
+SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.enc")
+LEGACY_SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
 SETTINGS_DIR = os.path.join(DATA_DIR, "settings")
 
 
 def _save_sessions():
-    os.makedirs(DATA_DIR, exist_ok=True)
+    if not persistence_enabled():
+        return
     try:
-        with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
-            json.dump(sessions, f, ensure_ascii=False, indent=2)
+        save_encrypted_json(SESSIONS_FILE, sessions)
     except Exception as e:
         print(f"[auth] 保存 sessions 失败: {e}")
 
 
 def _load_sessions():
-    if not os.path.isfile(SESSIONS_FILE):
+    if not persistence_enabled():
+        if os.path.isfile(LEGACY_SESSIONS_FILE):
+            print("[auth] legacy plaintext sessions.json ignored; configure APP_ENCRYPTION_KEY before migrating")
         return
     try:
-        with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = load_encrypted_json(SESSIONS_FILE) or {}
+        now = time.time()
         for sid, s in data.items():
-            sessions[sid] = s
+            if s.get("expires_at", 0) > now:
+                sessions[sid] = s
         print(f"[auth] 已恢复 {len(sessions)} 个 session")
     except Exception as e:
         print(f"[auth] 加载 sessions 失败: {e}")
 
 
+def _settings_path(uid: str) -> str | None:
+    if not uid.isdigit():
+        return None
+    return os.path.join(SETTINGS_DIR, f"{uid}.enc")
+
+
 def _load_user_settings(uid: str) -> dict:
     """返回 {api_key, model}，文件不存在返回默认值"""
-    path = os.path.join(SETTINGS_DIR, f"{uid}.json")
-    if not os.path.isfile(path):
+    path = _settings_path(uid)
+    if not persistence_enabled() or not path:
         return {"api_key": "", "model": "deepseek-v4-flash"}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return load_encrypted_json(path) or {"api_key": "", "model": "deepseek-v4-flash"}
     except Exception:
         return {"api_key": "", "model": "deepseek-v4-flash"}
 
 
 def _save_user_settings(uid: str, api_key: str, model: str):
-    os.makedirs(SETTINGS_DIR, exist_ok=True)
-    path = os.path.join(SETTINGS_DIR, f"{uid}.json")
+    path = _settings_path(uid)
+    if not persistence_enabled() or not path:
+        return
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"api_key": api_key, "model": model}, f, ensure_ascii=False, indent=2)
+        save_encrypted_json(path, {"api_key": api_key, "model": model})
     except Exception as e:
         print(f"[auth] 保存 settings 失败: {e}")
 
@@ -84,19 +101,27 @@ async def generate_qrcode() -> dict:
         qrcode_key = data["data"]["qrcode_key"]
         qrcode_url = data["data"]["url"]
 
-        # 生成二维码图片URL（使用外部API）
-        image_url = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=" + urllib.parse.quote(qrcode_url)
+        image = qrcode.make(qrcode_url)
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        image_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
+    now = time.time()
+    for pool_key, entry in list(qrcode_pool.items()):
+        if now - entry.get("created_at", now) > QR_TTL_SECONDS:
+            qrcode_pool.pop(pool_key, None)
     qrcode_pool[qrcode_key] = {
         "status": "pending",
         "session_id": None,
+        "created_at": now,
     }
     return {"qrcode_key": qrcode_key, "image_url": image_url}
 
 
 async def poll_qrcode(key: str) -> dict:
     """轮询二维码状态，确认后创建 session"""
-    if key not in qrcode_pool:
+    if key not in qrcode_pool or time.time() - qrcode_pool[key].get("created_at", 0) > QR_TTL_SECONDS:
+        qrcode_pool.pop(key, None)
         raise HTTPException(404, detail="二维码已过期")
 
     async with httpx.AsyncClient(headers=BILI_HEADERS) as client:
@@ -156,6 +181,7 @@ async def poll_qrcode(key: str) -> dict:
                 "avatar": user_info.get("avatar", ""),
                 "folders": [],
                 "created_at": time.time(),
+                "expires_at": time.time() + SESSION_TTL_SECONDS,
             }
 
             _save_sessions()
@@ -168,12 +194,21 @@ async def poll_qrcode(key: str) -> dict:
             return {"status": "unknown", "code": code}
 
 
+def delete_session(session_id: str) -> None:
+    if sessions.pop(session_id, None) is not None:
+        _save_sessions()
+
+
 def get_session(request: Request) -> dict:
     """FastAPI 依赖：从 Cookie 取 session_id，返回 session 数据"""
     session_id = request.cookies.get("session_id")
     if not session_id or session_id not in sessions:
         raise HTTPException(401, detail="未登录")
-    return sessions[session_id]
+    session = sessions[session_id]
+    if session.get("expires_at", 0) <= time.time():
+        delete_session(session_id)
+        raise HTTPException(401, detail="登录已过期")
+    return session
 
 
 def on_session_updated(session: dict):

@@ -108,6 +108,7 @@ function renderCleanTab(el) {
     const es = new EventSource(SCAN_URL, { withCredentials: true });
     trackES(es);
     let invalidItems = [];
+    let unknownCount = 0;
 
     es.addEventListener("progress", (e) => {
       clearInterval(msgTimer);
@@ -117,7 +118,7 @@ function renderCleanTab(el) {
       progressPct.textContent = pct + "%";
       phaseText.textContent = "正在逐条校验视频有效性…";
       icon.textContent = "🔍";
-      progressInfo.textContent = `已检查 ${d.checked} / ${d.total} 条，发现 ${d.invalid} 个失效视频`;
+      progressInfo.textContent = `已检查 ${d.checked} / ${d.total} 条，确认失效 ${d.invalid} 个，待复核 ${d.unknown || 0} 个`;
       status.textContent = "";
     });
 
@@ -127,6 +128,7 @@ function renderCleanTab(el) {
       btn.disabled = false;
       const d = JSON.parse(e.data);
       invalidItems = d.invalid || [];
+      unknownCount = Number(d.unknown || 0);
 
       // 完成动画
       progressFill.style.width = "100%";
@@ -142,6 +144,9 @@ function renderCleanTab(el) {
       setTimeout(() => {
         progressDiv.style.display = "none";
         renderCleanList(invalidItems, document.getElementById("cleanResult"));
+        if (unknownCount > 0) {
+          showToast(`${unknownCount} 条视频因网络、限流或权限问题无法确认，不会进入删除列表。`, "info");
+        }
       }, 800);
     });
 
@@ -206,7 +211,9 @@ function renderCleanList(items, el) {
       });
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
-      showInlineMessage(el, `已移除 ${data.removed}/${data.total} 个视频`, "success");
+      const skipped = Number(data.skipped || 0);
+      const detail = skipped > 0 ? `，另有 ${skipped} 条未能再次确认，已跳过` : "";
+      showInlineMessage(el, `已移除 ${data.removed}/${data.total} 个视频${detail}`, "success");
     } catch (e) {
       showToast(formatError(e, "移除失败"), "error");
       setButtonBusy(removeBtn, false);
