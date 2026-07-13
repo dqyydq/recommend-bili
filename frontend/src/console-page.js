@@ -1,193 +1,145 @@
-import { getSyncStatus, logout, setApiKey, setModel, getSettings, startSync } from "./api.js";
-import { renderClassifyModule } from "./classify-module.js";
-import { renderSearchModule } from "./search-module.js";
-import { renderDustModule } from "./dust-module.js";
-import { renderOrganizeModule } from "./organize-module.js";
-import { renderAgentsModule } from "./agents-module.js";
+import { getSettings, getSyncStatus, logout, setApiKey, setModel, startSync } from "./api.js";
+import { renderLearningProjectsAgent } from "./agents-module.js";
+import { renderCollectionLibrary } from "./collection-library.js";
+import { renderOperationsModule } from "./operations-module.js";
+import { renderWorkspaceModule } from "./workspace-module.js";
 import { escapeAttr, escapeHtml, setButtonBusy, showToast } from "./ui.js";
 
 export function renderConsole(app, user) {
   app.innerHTML = `
-    <div class="console">
-      <div class="sidebar">
-        <div class="logo">收藏夹管家</div>
-        <div class="menu-item active" data-page="classify">整理收藏夹</div>
-        <div class="menu-item" data-page="agents">Agent 实验室</div>
-        <div class="menu-item" data-page="search">寻找视频</div>
-        <div class="menu-item" data-page="dust">吃灰检测</div>
-        <div class="menu-item" data-page="organize">收藏夹整理</div>
-      </div>
-      <div class="main-area">
-        <div class="header">
-          <div class="page-title" id="pageTitle">整理收藏夹</div>
-          <div class="user-info">
-            <img src="${escapeAttr(user.avatar || '')}" alt="" onerror="this.style.display='none'" />
+    <div class="app-shell">
+      <header class="app-header">
+        <button class="brand" data-page="workspace" type="button" aria-label="返回工作台">
+          <span class="brand-mark">F</span><span>收藏夹管家</span>
+        </button>
+        <nav class="primary-nav" aria-label="主导航">
+          <button class="active" data-page="workspace" type="button">工作台</button>
+          <button data-page="library" type="button">收藏库</button>
+          <button data-page="learning" type="button">学习项目</button>
+          <button data-page="operations" type="button">操作记录</button>
+        </nav>
+        <div class="header-actions">
+          <button id="syncBtn" class="header-button" type="button"><span class="sync-dot"></span><span id="syncLabel">同步</span></button>
+          <button id="settingsBtn" class="header-button" type="button">设置</button>
+          <div class="user-menu">
+            ${user.avatar ? `<img src="${escapeAttr(user.avatar)}" alt="" onerror="this.style.display='none'" />` : ""}
             <span>${escapeHtml(user.nickname || "用户")}</span>
-            <button id="syncBtn" class="logout-btn" title="同步收藏夹">同步</button>
-            <span id="syncStatus" style="font-size:12px;color:#777;"></span>
-            <button id="settingsBtn" class="logout-btn" title="设置" style="font-size:16px;">&#9881;</button>
-            <button id="logoutBtn" class="logout-btn">退出</button>
+            <button id="logoutBtn" type="button">退出</button>
           </div>
         </div>
-        <div class="content" id="contentArea"></div>
-      </div>
-    </div>
-  `;
+      </header>
+      <main class="app-content" id="contentArea"></main>
+    </div>`;
 
-  const pageTitle = document.getElementById("pageTitle");
-  const contentArea = document.getElementById("contentArea");
-
-  const pageMap = {
-    classify: { title: "整理收藏夹", render: renderClassifyModule },
-    agents: { title: "Agent 实验室", render: renderAgentsModule },
-    search: { title: "寻找视频", render: renderSearchModule },
-    dust: { title: "吃灰检测", render: renderDustModule },
-    organize: { title: "收藏夹整理", render: renderOrganizeModule },
+  const content = document.getElementById("contentArea");
+  const pages = {
+    workspace: () => renderWorkspaceModule(content, { navigate }),
+    library: () => renderCollectionLibrary(content),
+    learning: () => renderLearningProjectsAgent(content),
+    operations: () => renderOperationsModule(content),
   };
 
-  document.querySelectorAll(".menu-item").forEach(item => {
-    item.addEventListener("click", () => {
-      document.querySelectorAll(".menu-item").forEach(i => i.classList.remove("active"));
-      item.classList.add("active");
-      const page = item.dataset.page;
-      pageTitle.textContent = pageMap[page].title;
-      pageMap[page].render(contentArea);
-    });
-  });
+  function navigate(page) {
+    const destination = pages[page] ? page : "workspace";
+    document.querySelectorAll("[data-page]").forEach(button => button.classList.toggle("active", button.dataset.page === destination));
+    content.setAttribute("data-view", destination);
+    pages[destination]();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
+  document.querySelectorAll("[data-page]").forEach(button => button.addEventListener("click", () => navigate(button.dataset.page)));
   document.getElementById("logoutBtn").addEventListener("click", async () => {
-    try { await logout(); } catch (e) {}
+    try { await logout(); } catch (_) { /* Reload still clears stale client state. */ }
     location.reload();
   });
 
-  const syncBtn = document.getElementById("syncBtn");
-  const syncStatus = document.getElementById("syncStatus");
+  bindSync();
+  document.getElementById("settingsBtn").addEventListener("click", showSettingsModal);
+  navigate("workspace");
+  if (!user.has_key) setTimeout(showSettingsModal, 500);
+}
 
-  async function refreshSyncStatus() {
+function bindSync() {
+  const button = document.getElementById("syncBtn");
+  const label = document.getElementById("syncLabel");
+  async function refresh() {
     try {
       const data = await getSyncStatus();
       const job = data.job;
-      if (!job) {
-        syncStatus.textContent = "未同步";
+      if (!job) { label.textContent = "尚未同步"; return; }
+      if (["queued", "running"].includes(job.status)) {
+        button.disabled = true;
+        label.textContent = `${Number(job.folders_processed || 0)}/${Number(job.folders_total || 0)}`;
+        setTimeout(refresh, 1500);
         return;
       }
-      if (job.status === "queued" || job.status === "running") {
-        syncBtn.disabled = true;
-        syncStatus.textContent = `同步中 ${job.folders_processed || 0}/${job.folders_total || 0}`;
-        setTimeout(refreshSyncStatus, 1500);
-        return;
-      }
-      syncBtn.disabled = false;
-      syncStatus.textContent = job.status === "completed" ? "已同步" : "同步失败";
-    } catch (_) {
-      syncStatus.textContent = "同步状态不可用";
-    }
+      button.disabled = false;
+      label.textContent = job.status === "completed" ? "已同步" : "同步失败";
+      button.classList.toggle("has-error", job.status === "failed");
+    } catch (_) { label.textContent = "状态不可用"; }
   }
-
-  syncBtn.addEventListener("click", async () => {
+  button.addEventListener("click", async () => {
     try {
-      setButtonBusy(syncBtn, true, "同步中…");
+      button.disabled = true;
+      label.textContent = "同步中…";
       await startSync(false);
-      refreshSyncStatus();
-    } catch (e) {
-      showToast(`同步失败: ${e.message}`, "error");
-      setButtonBusy(syncBtn, false);
+      refresh();
+    } catch (error) {
+      showToast(`同步失败：${error.message}`, "error");
+      button.disabled = false;
+      label.textContent = "重试同步";
     }
   });
-  refreshSyncStatus();
+  refresh();
+}
 
-  // 设置弹窗
-  document.getElementById("settingsBtn").addEventListener("click", () => showSettingsModal());
+function showSettingsModal() {
+  document.getElementById("settingsModal")?.remove();
+  const modal = document.createElement("div");
+  modal.id = "settingsModal";
+  modal.className = "modal-overlay";
+  modal.tabIndex = -1;
+  modal.innerHTML = `
+    <div class="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <div class="modal-heading"><div><span class="eyebrow">模型连接</span><h2 id="settingsTitle">设置</h2></div><button id="closeSettingsBtn" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <label class="form-field"><span>DeepSeek API Key</span><input id="settingsKeyInput" class="input" type="password" autocomplete="off" placeholder="sk-..." /></label>
+      <label class="form-field"><span>模型</span><input id="settingsModelInput" class="input" list="modelPresets" placeholder="deepseek-v4-flash" /></label>
+      <datalist id="modelPresets"><option value="deepseek-v4-flash"><option value="deepseek-chat"><option value="deepseek-reasoner"></datalist>
+      <p id="settingsError" class="inline-error" hidden></p>
+      <div class="modal-actions"><button id="cancelSettingsBtn" class="btn btn-secondary" type="button">取消</button><button id="saveSettingsBtn" class="btn" type="button">保存</button></div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.focus();
 
-  function showSettingsModal() {
-    // Remove existing modal if any
-    const existing = document.getElementById("settingsModal");
-    if (existing) existing.remove();
+  const keyInput = document.getElementById("settingsKeyInput");
+  const modelInput = document.getElementById("settingsModelInput");
+  let maskedKey = "";
+  getSettings().then(data => {
+    maskedKey = data.api_key || "";
+    keyInput.value = maskedKey;
+    modelInput.value = data.model || "deepseek-v4-flash";
+  }).catch(() => {});
+  keyInput.addEventListener("focus", () => { if (maskedKey && keyInput.value === maskedKey && maskedKey.includes("*")) keyInput.value = ""; });
 
-    const modal = document.createElement("div");
-    modal.id = "settingsModal";
-    modal.className = "modal-overlay";
-    modal.tabIndex = -1;
-    modal.innerHTML = `
-      <div class="modal">
-        <h3>设置</h3>
-        <div style="margin-bottom:14px;">
-          <label style="display:block;font-size:13px;font-weight:600;color:#333;margin-bottom:4px;">DeepSeek API Key</label>
-          <input id="settingsKeyInput" class="input" type="password" style="width:100%;" placeholder="sk-..." />
-        </div>
-        <div style="margin-bottom:14px;">
-          <label style="display:block;font-size:13px;font-weight:600;color:#333;margin-bottom:4px;">模型</label>
-          <input id="settingsModelInput" class="input" list="modelPresets" style="width:100%;" placeholder="deepseek-v4-flash" />
-          <datalist id="modelPresets">
-            <option value="deepseek-v4-flash">
-            <option value="deepseek-chat">
-            <option value="deepseek-reasoner">
-          </datalist>
-        </div>
-        <p id="settingsError" style="color:#f43f5e;font-size:13px;display:none;"></p>
-        <div class="modal-actions">
-          <button id="cancelSettingsBtn" class="btn btn-secondary">取消</button>
-          <button id="saveSettingsBtn" class="btn">保存</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(modal);
-    modal.focus();
-
-    const keyInput = document.getElementById("settingsKeyInput");
-    const modelInput = document.getElementById("settingsModelInput");
-
-    let maskedKey = "";
-    getSettings().then(data => {
-      maskedKey = data.api_key || "";
-      keyInput.value = maskedKey;
-      modelInput.value = data.model || "deepseek-v4-flash";
-    }).catch(() => {});
-
-    keyInput.addEventListener("focus", () => {
-      if (maskedKey && keyInput.value === maskedKey && keyInput.value.includes("*")) {
-        keyInput.value = "";
-      }
-    });
-
-    document.getElementById("cancelSettingsBtn").addEventListener("click", () => modal.remove());
-    document.getElementById("saveSettingsBtn").addEventListener("click", async () => {
-      const saveBtn = document.getElementById("saveSettingsBtn");
-      const newKey = keyInput.value.trim();
-      const newModel = modelInput.value.trim() || "deepseek-v4-flash";
-      const errEl = document.getElementById("settingsError");
-
-      try {
-        errEl.style.display = "none";
-        setButtonBusy(saveBtn, true, "保存中…");
-        if (newKey && !newKey.includes("*")) {
-          await setApiKey(newKey);
-        }
-        await setModel(newModel);
-        modal.remove();
-        showToast("设置已保存", "success");
-      } catch (e) {
-        errEl.textContent = "保存失败: " + e.message;
-        errEl.style.display = "block";
-      } finally {
-        setButtonBusy(saveBtn, false);
-      }
-    });
-
-    // Close on overlay click
-    modal.addEventListener("click", (e) => {
-      if (e.target === modal) modal.remove();
-    });
-    modal.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") modal.remove();
-    });
-  }
-
-  // 默认加载整理收藏夹
-  renderClassifyModule(contentArea);
-
-  // 首次登录无 Key → 自动弹出设置弹窗
-  if (!user.has_key) {
-    setTimeout(() => showSettingsModal(), 500);
-  }
+  const close = () => modal.remove();
+  document.getElementById("closeSettingsBtn").addEventListener("click", close);
+  document.getElementById("cancelSettingsBtn").addEventListener("click", close);
+  modal.addEventListener("click", event => { if (event.target === modal) close(); });
+  modal.addEventListener("keydown", event => { if (event.key === "Escape") close(); });
+  document.getElementById("saveSettingsBtn").addEventListener("click", async event => {
+    const saveButton = event.currentTarget;
+    const errorElement = document.getElementById("settingsError");
+    try {
+      errorElement.hidden = true;
+      setButtonBusy(saveButton, true, "保存中…");
+      const key = keyInput.value.trim();
+      if (key && !key.includes("*")) await setApiKey(key);
+      await setModel(modelInput.value.trim() || "deepseek-v4-flash");
+      close();
+      showToast("设置已保存", "success");
+    } catch (error) {
+      errorElement.textContent = `保存失败：${error.message}`;
+      errorElement.hidden = false;
+    } finally { setButtonBusy(saveButton, false); }
+  });
 }

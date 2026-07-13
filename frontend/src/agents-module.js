@@ -344,7 +344,7 @@ function renderLearningAgent(el) {
   });
 }
 
-function renderLearningProjectsAgent(el) {
+export function renderLearningProjectsAgent(el) {
   el.innerHTML = `
     <div class="agent-toolbar">
       <input id="projectGoalInput" class="input" style="flex:1" placeholder="例如：4 周掌握 FastAPI 项目开发" />
@@ -398,7 +398,7 @@ function renderLearningProjectDetail(project, el, reload) {
   document.getElementById("confirmReviewBtn")?.addEventListener("click", async () => renderLearningProjectDetail(await confirmLearningProjectReview(project.id, week), el, reload));
 }
 
-function renderFolderStructureAgent(el) {
+export function renderFolderStructureAgent(el) {
   el.innerHTML = `
     <div class="agent-toolbar">
       <input id="structureGoalInput" class="input" style="flex:1" value="按用途与主题重建收藏夹结构" />
@@ -450,7 +450,7 @@ function renderFolderStructurePlan(plan, el) {
   }
 }
 
-function renderOrganizationAgent(el) {
+export function renderOrganizationAgent(el) {
   el.innerHTML = `
     <div class="agent-toolbar">
       <input id="organizationGoalInput" class="input" style="flex:1;" placeholder="例如：清理重复教程，保留真正想看的内容" />
