@@ -15,6 +15,7 @@ from agents import (
     analyze_favorite_profile,
     build_knowledge_dashboard,
     build_learning_path,
+    build_organization_plan,
     rebuild_favorite_index,
     semantic_search_favorites,
 )
@@ -23,8 +24,9 @@ from bili import search_all, add_favorite, _client
 from classifier import classify_favorites
 from clean import _check_bvid, scan_invalid
 from database import (
-    close_db, get_favorites, get_folders, init_db, list_classifications,
-    load_classification, mark_sync_required, record_operation, save_classification, search_favorites,
+    approve_organization_plan, close_db, get_favorites, get_folders, get_organization_plan,
+    init_db, list_classifications, list_organization_plans, load_classification,
+    mark_sync_required, record_operation, save_classification, search_favorites, set_plan_action_state,
 )
 from sync_service import start_sync
 
@@ -125,6 +127,15 @@ class SemanticSearchRequest(BaseModel):
 class LearningPathRequest(BaseModel):
     goal: str = Field(min_length=1, max_length=500)
     refresh: bool = False
+
+
+class OrganizationPlanRequest(BaseModel):
+    goal: str = Field(min_length=1, max_length=500)
+    max_actions: int = Field(default=12, ge=1, le=30)
+
+
+class PlanActionStateRequest(BaseModel):
+    state: str = Field(pattern="^(approved|skipped)$")
 
 
 @app.get("/api/settings")
@@ -515,6 +526,59 @@ async def api_agent_learning_path(req: LearningPathRequest, session: dict = Depe
         )
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.post("/api/agents/organization-plans", dependencies=[Depends(require_trusted_origin)])
+async def api_organization_plan(req: OrganizationPlanRequest, session: dict = Depends(get_session)):
+    api_key = session.get("deepseek_key", "")
+    if not api_key:
+        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
+    try:
+        return await build_organization_plan(
+            session.get("uid", ""),
+            req.goal,
+            api_key,
+            session.get("model", "deepseek-v4-flash"),
+            req.max_actions,
+        )
+    except Exception as exc:
+        print(f"[organization_plan] failed: {exc}")
+        return {"error": "整理计划生成失败，请稍后重试"}
+
+
+@app.get("/api/agents/organization-plans")
+async def api_organization_plans(session: dict = Depends(get_session)):
+    return {"plans": await list_organization_plans(session.get("uid", ""))}
+
+
+@app.get("/api/agents/organization-plans/{plan_id}")
+async def api_organization_plan_detail(plan_id: str, session: dict = Depends(get_session)):
+    plan = await get_organization_plan(session.get("uid", ""), plan_id)
+    if plan is None:
+        return JSONResponse({"error": "整理计划不存在"}, status_code=404)
+    return plan
+
+
+@app.post("/api/agents/organization-plans/{plan_id}/actions/{action_id}", dependencies=[Depends(require_trusted_origin)])
+async def api_organization_plan_action(
+    plan_id: str,
+    action_id: str,
+    req: PlanActionStateRequest,
+    session: dict = Depends(get_session),
+):
+    plan = await set_plan_action_state(session.get("uid", ""), plan_id, action_id, req.state)
+    if plan is None:
+        return JSONResponse({"error": "动作不存在或计划已确认"}, status_code=409)
+    return plan
+
+
+@app.post("/api/agents/organization-plans/{plan_id}/approve", dependencies=[Depends(require_trusted_origin)])
+async def api_organization_plan_approve(plan_id: str, session: dict = Depends(get_session)):
+    plan = await approve_organization_plan(session.get("uid", ""), plan_id)
+    if plan is None:
+        return JSONResponse({"error": "计划不存在或已确认"}, status_code=409)
+    await record_operation(session.get("uid", ""), "approve_organization_plan", {"plan_id": plan_id})
+    return plan
 
 
 @app.post("/api/agents/search/index", dependencies=[Depends(require_trusted_origin)])

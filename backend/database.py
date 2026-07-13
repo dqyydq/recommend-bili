@@ -90,6 +90,37 @@ CREATE TABLE IF NOT EXISTS classification_history (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS classification_history_uid_created_idx ON classification_history(uid, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS organization_plans (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+    goal TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('draft', 'approved', 'cancelled')) DEFAULT 'draft',
+    action_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    approved_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS organization_plans_uid_created_idx ON organization_plans(uid, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS organization_plan_actions (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL REFERENCES organization_plans(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    action_type TEXT NOT NULL CHECK (action_type IN ('review_duplicate', 'review_stale')),
+    risk TEXT NOT NULL CHECK (risk IN ('low', 'medium', 'high')),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'approved', 'skipped')) DEFAULT 'pending',
+    folder_id BIGINT NOT NULL,
+    media_id BIGINT NOT NULL,
+    bvid TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    folder_name TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (plan_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS organization_plan_actions_plan_idx ON organization_plan_actions(plan_id, sequence);
 """
 
 
@@ -380,3 +411,91 @@ async def load_classification(uid: str, record_id: str) -> dict[str, Any] | None
         "categories": categories,
         "created_at": row["created_at"].isoformat(),
     }
+
+
+async def create_organization_plan(uid: str, goal: str, summary: str, actions: list[dict[str, Any]]) -> dict[str, Any]:
+    plan_id = secrets.token_urlsafe(12)
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO organization_plans (id, uid, goal, summary, action_count) VALUES ($1, $2, $3, $4, $5)",
+                plan_id, uid, goal, summary, len(actions),
+            )
+            if actions:
+                await conn.executemany(
+                    """
+                    INSERT INTO organization_plan_actions (
+                        id, plan_id, sequence, action_type, risk, folder_id, media_id, bvid, title, folder_name, reason
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                    """,
+                    [
+                        (
+                            secrets.token_urlsafe(12), plan_id, index, action["action_type"], action["risk"],
+                            action["folder_id"], action["media_id"], action.get("bvid", ""),
+                            action["title"], action["folder_name"], action["reason"],
+                        )
+                        for index, action in enumerate(actions, start=1)
+                    ],
+                )
+    return await get_organization_plan(uid, plan_id) or {}
+
+
+async def get_organization_plan(uid: str, plan_id: str) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        plan = await conn.fetchrow(
+            "SELECT id, goal, summary, status, action_count, created_at, approved_at FROM organization_plans WHERE uid = $1 AND id = $2",
+            uid, plan_id,
+        )
+        if plan is None:
+            return None
+        actions = await conn.fetch(
+            "SELECT id, sequence, action_type, risk, state, folder_id, media_id, bvid, title, folder_name, reason "
+            "FROM organization_plan_actions WHERE plan_id = $1 ORDER BY sequence",
+            plan_id,
+        )
+    data = dict(plan)
+    data["actions"] = [dict(action) for action in actions]
+    return data
+
+
+async def list_organization_plans(uid: str, limit: int = 20) -> list[dict[str, Any]]:
+    async with pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, goal, summary, status, action_count, created_at, approved_at "
+            "FROM organization_plans WHERE uid = $1 ORDER BY created_at DESC LIMIT $2",
+            uid, limit,
+        )
+    return [dict(row) for row in rows]
+
+
+async def set_plan_action_state(uid: str, plan_id: str, action_id: str, state: str) -> dict[str, Any] | None:
+    if state not in {"approved", "skipped"}:
+        raise ValueError("invalid action state")
+    async with pool().acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE organization_plan_actions action SET state = $4
+            FROM organization_plans plan
+            WHERE action.plan_id = plan.id AND plan.uid = $1 AND action.plan_id = $2 AND action.id = $3
+              AND plan.status = 'draft'
+            """,
+            uid, plan_id, action_id, state,
+        )
+    return await get_organization_plan(uid, plan_id) if result.endswith("1") else None
+
+
+async def approve_organization_plan(uid: str, plan_id: str) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            result = await conn.execute(
+                "UPDATE organization_plans SET status = 'approved', approved_at = NOW(), updated_at = NOW() "
+                "WHERE uid = $1 AND id = $2 AND status = 'draft'",
+                uid, plan_id,
+            )
+            if not result.endswith("1"):
+                return None
+            await conn.execute(
+                "UPDATE organization_plan_actions SET state = 'approved' WHERE plan_id = $1 AND state = 'pending'",
+                plan_id,
+            )
+    return await get_organization_plan(uid, plan_id)

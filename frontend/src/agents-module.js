@@ -1,9 +1,13 @@
 import {
   analyzeProfile,
+  approveOrganizationPlan,
   buildLearningPath,
+  buildOrganizationPlan,
   getKnowledgeDashboard,
+  getOrganizationPlans,
   rebuildSearchIndex,
   semanticSearch,
+  updateOrganizationPlanAction,
 } from "./api.js";
 import { escapeAttr, escapeHtml, formatError, setButtonBusy, showInlineMessage, showToast } from "./ui.js";
 
@@ -15,6 +19,7 @@ export function renderAgentsModule(container) {
         <div class="tab" data-agent-tab="profile">收藏人格</div>
         <div class="tab" data-agent-tab="retrieval">智能检索</div>
         <div class="tab" data-agent-tab="learning">学习路线</div>
+        <div class="tab" data-agent-tab="organization">整理计划</div>
       </div>
       <div id="agentContent"></div>
     </div>
@@ -29,6 +34,7 @@ export function renderAgentsModule(container) {
       if (tab.dataset.agentTab === "profile") renderProfileAgent(content);
       if (tab.dataset.agentTab === "retrieval") renderRetrievalAgent(content);
       if (tab.dataset.agentTab === "learning") renderLearningAgent(content);
+      if (tab.dataset.agentTab === "organization") renderOrganizationAgent(content);
     });
   });
 
@@ -318,6 +324,131 @@ function renderLearningAgent(el) {
   input.addEventListener("keydown", e => {
     if (e.key === "Enter") run(false);
   });
+}
+
+function renderOrganizationAgent(el) {
+  el.innerHTML = `
+    <div class="agent-toolbar">
+      <input id="organizationGoalInput" class="input" style="flex:1;" placeholder="例如：清理重复教程，保留真正想看的内容" />
+      <button id="organizationPlanBtn" class="btn">生成计划</button>
+      <button id="organizationHistoryBtn" class="btn btn-secondary">历史计划</button>
+    </div>
+    <div id="organizationResult"></div>
+  `;
+
+  const input = document.getElementById("organizationGoalInput");
+  const planBtn = document.getElementById("organizationPlanBtn");
+  const historyBtn = document.getElementById("organizationHistoryBtn");
+  const result = document.getElementById("organizationResult");
+
+  async function generate() {
+    const goal = input.value.trim();
+    if (!goal) {
+      showToast("请输入整理目标", "error");
+      return;
+    }
+    try {
+      setButtonBusy(planBtn, true, "生成中…");
+      result.innerHTML = loadingBlock("整理 Agent 正在检查重复和长期未处理的收藏…");
+      const plan = await buildOrganizationPlan(goal);
+      renderOrganizationPlan(plan, result);
+    } catch (e) {
+      showInlineMessage(result, formatError(e, "整理计划生成失败"));
+    } finally {
+      setButtonBusy(planBtn, false);
+    }
+  }
+
+  planBtn.addEventListener("click", generate);
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter") generate();
+  });
+  historyBtn.addEventListener("click", async () => {
+    try {
+      setButtonBusy(historyBtn, true, "加载中…");
+      const data = await getOrganizationPlans();
+      renderOrganizationHistory(data.plans || [], result);
+    } catch (e) {
+      showInlineMessage(result, formatError(e, "加载历史计划失败"));
+    } finally {
+      setButtonBusy(historyBtn, false);
+    }
+  });
+}
+
+function renderOrganizationHistory(plans, el) {
+  if (!plans.length) {
+    showInlineMessage(el, "暂无整理计划", "muted");
+    return;
+  }
+  el.innerHTML = `<div class="agent-plan-list">${plans.map(plan => `
+    <div class="agent-plan-card">
+      <div><strong>${escapeHtml(plan.goal)}</strong><p>${escapeHtml(plan.summary || "")}</p></div>
+      <span class="agent-plan-status">${escapeHtml(plan.status)}</span>
+      <small>${Number(plan.action_count || 0)} 项</small>
+    </div>
+  `).join("")}</div>`;
+}
+
+function renderOrganizationPlan(plan, el) {
+  const actions = plan.actions || [];
+  const isDraft = plan.status === "draft";
+  el.innerHTML = `
+    <div class="agent-answer">
+      <div class="agent-kicker">Organization Plan Agent</div>
+      <p><strong>${escapeHtml(plan.goal || "整理目标")}</strong></p>
+      <p>${escapeHtml(plan.summary || "")}</p>
+      <small>${Number(plan.action_count || actions.length)} 项待审核</small>
+    </div>
+    <div class="agent-plan-actions">
+      ${actions.map(action => renderOrganizationAction(action, isDraft)).join("") || `<p class="muted">没有可审核的动作</p>`}
+    </div>
+    ${isDraft ? `<div class="agent-plan-footer"><button id="approveOrganizationPlanBtn" class="btn">确认计划</button></div>` : ""}
+  `;
+
+  if (isDraft) {
+    el.querySelectorAll("[data-plan-action]").forEach(button => {
+      button.addEventListener("click", async () => {
+        try {
+          setButtonBusy(button, true, "更新中…");
+          const updated = await updateOrganizationPlanAction(plan.id, button.dataset.actionId, button.dataset.planAction);
+          renderOrganizationPlan(updated, el);
+        } catch (e) {
+          showToast(formatError(e, "更新动作失败"), "error");
+          setButtonBusy(button, false);
+        }
+      });
+    });
+    document.getElementById("approveOrganizationPlanBtn")?.addEventListener("click", async event => {
+      try {
+        setButtonBusy(event.currentTarget, true, "确认中…");
+        const updated = await approveOrganizationPlan(plan.id);
+        renderOrganizationPlan(updated, el);
+        showToast("计划已确认", "success");
+      } catch (e) {
+        showToast(formatError(e, "确认计划失败"), "error");
+        setButtonBusy(event.currentTarget, false);
+      }
+    });
+  }
+}
+
+function renderOrganizationAction(action, isDraft) {
+  const actionName = action.action_type === "review_duplicate" ? "重复收藏复核" : "长期未处理复核";
+  const stateName = action.state === "skipped" ? "已跳过" : action.state === "approved" ? "已保留" : "待审核";
+  return `<div class="agent-plan-action">
+    <div class="agent-plan-action-head">
+      <span class="agent-risk agent-risk-${escapeAttr(action.risk || "low")}">${escapeHtml(actionName)}</span>
+      <span class="agent-plan-status">${escapeHtml(stateName)}</span>
+    </div>
+    <a href="${escapeAttr(`https://www.bilibili.com/video/${action.bvid || ""}`)}" target="_blank" rel="noopener">${escapeHtml(action.title)}</a>
+    <p>${escapeHtml(action.reason || "")}</p>
+    <small>${escapeHtml(action.folder_name || "")}</small>
+    ${isDraft ? `<div class="agent-plan-action-buttons">
+      <button class="btn btn-secondary" data-plan-action="skipped" data-action-id="${escapeAttr(action.id)}">跳过</button>
+      <button class="btn" data-plan-action="approved" data-action-id="${escapeAttr(action.id)}">保留复核</button>
+    </div>` : ""}
+  </div>`;
 }
 
 function renderLearningResult(data, el) {

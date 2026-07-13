@@ -7,13 +7,14 @@ from collections import Counter
 from openai import AsyncOpenAI
 
 from classifier import DEEPSEEK_BASE_URL
-from database import get_favorites, get_folders
+from database import create_organization_plan, get_favorites, get_folders
 from embedding import embedding_collection_suffix, get_embeddings
 
 CHROMA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "chroma"))
 PROFILE_SAMPLE_SIZE = 80
 CHROMA_BATCH_SIZE = 500
 RECENT_LIMIT = 6
+PLAN_CANDIDATE_LIMIT = 60
 
 
 def _safe_collection_name(uid: str) -> str:
@@ -97,6 +98,123 @@ def _keyword_reason(query: str, meta: dict) -> str:
     if meta.get("folder_name"):
         return f"语义接近，来源收藏夹：{meta.get('folder_name')}"
     return "语义相似度较高"
+
+
+def _organization_candidates(items: list[dict]) -> list[dict]:
+    candidates: list[dict] = []
+    duplicate_groups: dict[str, list[dict]] = {}
+    for item in items:
+        bvid = item.get("bvid", "")
+        if bvid:
+            duplicate_groups.setdefault(bvid, []).append(item)
+
+    duplicate_media_ids: set[tuple[int, int]] = set()
+    for group in duplicate_groups.values():
+        folder_ids = {item.get("folder_id") for item in group}
+        if len(group) < 2 or len(folder_ids) < 2:
+            continue
+        keep = max(group, key=lambda item: item.get("fav_time", 0))
+        for item in group:
+            if item is keep:
+                continue
+            duplicate_media_ids.add((int(item.get("folder_id") or 0), int(item.get("id") or 0)))
+            candidates.append({
+                "candidate_id": f"duplicate:{item.get('folder_id')}:{item.get('id')}",
+                "action_type": "review_duplicate",
+                "risk": "medium",
+                "folder_id": int(item.get("folder_id") or 0),
+                "media_id": int(item.get("id") or 0),
+                "bvid": item.get("bvid", ""),
+                "title": item.get("title", ""),
+                "folder_name": item.get("folder_name", ""),
+                "reason": "同一视频出现在多个收藏夹，建议确认是否需要保留重复副本。",
+            })
+
+    now = time.time()
+    for item in sorted(items, key=lambda value: value.get("fav_time", 0)):
+        key = (int(item.get("folder_id") or 0), int(item.get("id") or 0))
+        age = now - float(item.get("fav_time") or 0)
+        if key in duplicate_media_ids or age < 180 * 86400:
+            continue
+        candidates.append({
+            "candidate_id": f"stale:{item.get('folder_id')}:{item.get('id')}",
+            "action_type": "review_stale",
+            "risk": "low",
+            "folder_id": key[0],
+            "media_id": key[1],
+            "bvid": item.get("bvid", ""),
+            "title": item.get("title", ""),
+            "folder_name": item.get("folder_name", ""),
+            "reason": "收藏时间较久，建议先确认它是否仍与当前兴趣或学习目标相关。",
+        })
+        if len(candidates) >= PLAN_CANDIDATE_LIMIT:
+            break
+    return [candidate for candidate in candidates if candidate["folder_id"] and candidate["media_id"]][:PLAN_CANDIDATE_LIMIT]
+
+
+async def build_organization_plan(
+    uid: str,
+    goal: str,
+    api_key: str,
+    model: str,
+    max_actions: int = 12,
+) -> dict:
+    items = await get_favorites(uid)
+    if not items:
+        return {"error": "本地收藏快照为空，请先同步后再生成整理计划。"}
+
+    candidates = _organization_candidates(items)
+    if not candidates:
+        return {"error": "当前没有足够明确的重复或长期未处理内容可供生成计划。"}
+
+    max_actions = max(1, min(max_actions, 30, len(candidates)))
+    prompt_candidates = "\n".join(
+        f"- {candidate['candidate_id']} | {candidate['action_type']} | {candidate['title']} | 收藏夹:{candidate['folder_name']}"
+        for candidate in candidates
+    )
+    prompt = f"""
+你是收藏整理计划 Agent。用户目标：{goal}
+只能从候选项中选择，不得编造视频或动作。当前只生成“人工复核清单”，不执行移动或删除。
+返回 JSON，不要 Markdown：
+{{
+  "summary": "不超过80字的整理策略",
+  "selected_ids": ["候选ID，最多{max_actions}个]
+}}
+
+候选项：
+{prompt_candidates}
+""".strip()
+
+    selected_ids: list[str] = []
+    summary = "我先挑出重复收藏和长期未处理内容，供你逐项确认。"
+    if api_key:
+        try:
+            client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=500,
+                temperature=0.2,
+            )
+            payload = _json_from_text(response.choices[0].message.content or "")
+            selected_ids = payload.get("selected_ids", []) if isinstance(payload.get("selected_ids"), list) else []
+            if isinstance(payload.get("summary"), str) and payload["summary"].strip():
+                summary = payload["summary"].strip()[:160]
+        except Exception as exc:
+            print(f"[organization_agent] LLM failed, using deterministic candidates: {exc}")
+
+    candidate_by_id = {candidate["candidate_id"]: candidate for candidate in candidates}
+    selected = []
+    for candidate_id in selected_ids:
+        candidate = candidate_by_id.get(str(candidate_id))
+        if candidate and candidate not in selected:
+            selected.append(candidate)
+        if len(selected) >= max_actions:
+            break
+    if not selected:
+        selected = candidates[:max_actions]
+
+    return await create_organization_plan(uid, goal.strip(), summary, selected)
 
 
 async def build_knowledge_dashboard(uid: str, cookies: dict, folders: list[dict] | None = None) -> dict:

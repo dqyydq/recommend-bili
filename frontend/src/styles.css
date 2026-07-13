@@ -766,6 +766,80 @@ body {
   color: #555;
 }
 
+.agent-plan-actions,
+.agent-plan-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.agent-plan-action,
+.agent-plan-card {
+  border: 1px solid #e4e6eb;
+  background: #fff;
+  padding: 14px;
+}
+
+.agent-plan-action-head,
+.agent-plan-card,
+.agent-plan-action-buttons,
+.agent-plan-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-plan-card {
+  justify-content: space-between;
+}
+
+.agent-plan-card p,
+.agent-plan-action p {
+  margin: 7px 0;
+  color: #606266;
+  font-size: 13px;
+}
+
+.agent-plan-action a {
+  color: #1f5fbf;
+  font-weight: 600;
+}
+
+.agent-plan-action-buttons {
+  margin-top: 12px;
+}
+
+.agent-plan-footer {
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.agent-plan-status {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.agent-risk {
+  border-radius: 3px;
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
+.agent-risk-low {
+  background: #e8f5e9;
+  color: #207245;
+}
+
+.agent-risk-medium {
+  background: #fff3cd;
+  color: #8a5a00;
+}
+
+.agent-risk-high {
+  background: #ffe6e6;
+  color: #b42318;
+}
+
 @media (max-width: 760px) {
   .agent-toolbar,
   .agent-profile-head {

@@ -125,6 +125,28 @@ export function buildLearningPath(goal, options = {}) {
   });
 }
 
+export function buildOrganizationPlan(goal, maxActions = 12) {
+  return request("/agents/organization-plans", {
+    method: "POST",
+    body: JSON.stringify({ goal, max_actions: maxActions }),
+  });
+}
+
+export function getOrganizationPlans() {
+  return request("/agents/organization-plans");
+}
+
+export function updateOrganizationPlanAction(planId, actionId, state) {
+  return request(`/agents/organization-plans/${encodeURIComponent(planId)}/actions/${encodeURIComponent(actionId)}`, {
+    method: "POST",
+    body: JSON.stringify({ state }),
+  });
+}
+
+export function approveOrganizationPlan(planId) {
+  return request(`/agents/organization-plans/${encodeURIComponent(planId)}/approve`, { method: "POST" });
+}
+
 export function logout() {
   return request("/auth/logout", { method: "POST" });
 }
