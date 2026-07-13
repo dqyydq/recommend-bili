@@ -13,7 +13,9 @@ processes they start themselves.
 1. Resolve the repository root relative to the script location.
 2. Check that Docker, Node/npm, and `.venv` exist; it will not install or
    upgrade anything.
-3. Refuse to start when ports 8000 or 3000 are already occupied. It never kills
+3. Default to ports 8000 and 3000, while allowing explicit script parameters
+   when another local project already owns a default port. Refuse to start when
+   the selected ports are already occupied. It never kills
    the existing process because it may belong to another project.
 4. Start only this repository's Compose PostgreSQL service and wait for it to
    become ready.
@@ -27,10 +29,10 @@ processes they start themselves.
 
 ## Stop Script
 
-`scripts/stop.ps1` reads only process IDs recorded by `start.ps1`, stops those
-processes if they still exist, then runs `docker compose down`. It preserves the
-PostgreSQL volume and all local user data. It does not inspect or stop unrelated
-Docker containers.
+`scripts/stop.ps1` reads only process IDs recorded by `start.ps1`, validates
+their start times, then stops only those process trees before running `docker
+compose down`. It preserves the PostgreSQL volume and all local user data. It
+does not inspect or stop unrelated Docker containers.
 
 ## Safety
 
