@@ -147,6 +147,10 @@ export function approveOrganizationPlan(planId) {
   return request(`/agents/organization-plans/${encodeURIComponent(planId)}/approve`, { method: "POST" });
 }
 
+export function executeOrganizationPlan(planId) {
+  return request(`/agents/organization-plans/${encodeURIComponent(planId)}/execute`, { method: "POST" });
+}
+
 export function logout() {
   return request("/auth/logout", { method: "POST" });
 }

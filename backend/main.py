@@ -28,6 +28,7 @@ from database import (
     init_db, list_classifications, list_organization_plans, load_classification,
     mark_sync_required, record_operation, save_classification, search_favorites, set_plan_action_state,
 )
+from organization_executor import execute_organization_plan
 from sync_service import start_sync
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
@@ -579,6 +580,26 @@ async def api_organization_plan_approve(plan_id: str, session: dict = Depends(ge
         return JSONResponse({"error": "计划不存在或已确认"}, status_code=409)
     await record_operation(session.get("uid", ""), "approve_organization_plan", {"plan_id": plan_id})
     return plan
+
+
+@app.post("/api/agents/organization-plans/{plan_id}/execute", dependencies=[Depends(require_trusted_origin)])
+async def api_organization_plan_execute(plan_id: str, session: dict = Depends(get_session)):
+    cookies = session.get("bili_cookies", {})
+    if not cookies.get("bili_jct"):
+        return JSONResponse({"error": "Missing Bilibili CSRF cookie. Please log in again."}, status_code=400)
+
+    result = await execute_organization_plan(session.get("uid", ""), plan_id, cookies)
+    plan = result.get("plan")
+    if plan is None:
+        return JSONResponse({"error": "Organization plan not found."}, status_code=404)
+
+    counts = result.get("counts", {})
+    if result.get("claimed") and counts.get("deleted", 0):
+        uid = session.get("uid", "")
+        await mark_sync_required(uid)
+        await record_operation(uid, "execute_organization_plan", {"plan_id": plan_id, **counts})
+        await start_sync(uid, cookies, session.get("nickname", ""), session.get("avatar", ""))
+    return {**plan, "execution_counts": counts, "execution_started": bool(result.get("claimed"))}
 
 
 @app.post("/api/agents/search/index", dependencies=[Depends(require_trusted_origin)])

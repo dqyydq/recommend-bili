@@ -121,6 +121,13 @@ CREATE TABLE IF NOT EXISTS organization_plan_actions (
     UNIQUE (plan_id, sequence)
 );
 CREATE INDEX IF NOT EXISTS organization_plan_actions_plan_idx ON organization_plan_actions(plan_id, sequence);
+
+ALTER TABLE organization_plans ADD COLUMN IF NOT EXISTS execution_status TEXT NOT NULL DEFAULT 'idle';
+ALTER TABLE organization_plans ADD COLUMN IF NOT EXISTS execution_started_at TIMESTAMPTZ;
+ALTER TABLE organization_plans ADD COLUMN IF NOT EXISTS execution_finished_at TIMESTAMPTZ;
+ALTER TABLE organization_plan_actions ADD COLUMN IF NOT EXISTS execution_state TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE organization_plan_actions ADD COLUMN IF NOT EXISTS execution_message TEXT NOT NULL DEFAULT '';
+ALTER TABLE organization_plan_actions ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ;
 """
 
 
@@ -443,13 +450,15 @@ async def create_organization_plan(uid: str, goal: str, summary: str, actions: l
 async def get_organization_plan(uid: str, plan_id: str) -> dict[str, Any] | None:
     async with pool().acquire() as conn:
         plan = await conn.fetchrow(
-            "SELECT id, goal, summary, status, action_count, created_at, approved_at FROM organization_plans WHERE uid = $1 AND id = $2",
+            "SELECT id, goal, summary, status, action_count, created_at, approved_at, execution_status, "
+            "execution_started_at, execution_finished_at FROM organization_plans WHERE uid = $1 AND id = $2",
             uid, plan_id,
         )
         if plan is None:
             return None
         actions = await conn.fetch(
-            "SELECT id, sequence, action_type, risk, state, folder_id, media_id, bvid, title, folder_name, reason "
+            "SELECT id, sequence, action_type, risk, state, folder_id, media_id, bvid, title, folder_name, reason, "
+            "execution_state, execution_message, executed_at "
             "FROM organization_plan_actions WHERE plan_id = $1 ORDER BY sequence",
             plan_id,
         )
@@ -461,7 +470,8 @@ async def get_organization_plan(uid: str, plan_id: str) -> dict[str, Any] | None
 async def list_organization_plans(uid: str, limit: int = 20) -> list[dict[str, Any]]:
     async with pool().acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, goal, summary, status, action_count, created_at, approved_at "
+            "SELECT id, goal, summary, status, action_count, created_at, approved_at, execution_status, "
+            "execution_started_at, execution_finished_at "
             "FROM organization_plans WHERE uid = $1 ORDER BY created_at DESC LIMIT $2",
             uid, limit,
         )
@@ -499,3 +509,72 @@ async def approve_organization_plan(uid: str, plan_id: str) -> dict[str, Any] | 
                 plan_id,
             )
     return await get_organization_plan(uid, plan_id)
+
+
+async def claim_organization_plan_execution(uid: str, plan_id: str) -> bool:
+    """Claim an approved plan exactly once before any external mutation."""
+    async with pool().acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE organization_plans
+            SET execution_status = 'running', execution_started_at = NOW(), execution_finished_at = NULL, updated_at = NOW()
+            WHERE uid = $1 AND id = $2 AND status = 'approved'
+              AND execution_status IN ('idle', 'partial_failed', 'failed')
+            """,
+            uid, plan_id,
+        )
+    return result.endswith("1")
+
+
+async def get_executable_plan_actions(uid: str, plan_id: str) -> list[dict[str, Any]]:
+    async with pool().acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT action.id, action.folder_id, action.media_id, action.bvid, action.title
+            FROM organization_plan_actions action
+            JOIN organization_plans plan ON plan.id = action.plan_id
+            WHERE plan.uid = $1 AND action.plan_id = $2 AND plan.execution_status = 'running'
+              AND action.state = 'approved'
+              AND action.execution_state IN ('pending', 'failed', 'skipped_unreachable')
+            ORDER BY action.sequence
+            """,
+            uid, plan_id,
+        )
+    return [dict(row) for row in rows]
+
+
+async def set_plan_action_execution_result(
+    uid: str,
+    plan_id: str,
+    action_id: str,
+    execution_state: str,
+    message: str,
+) -> None:
+    allowed_states = {'deleted', 'skipped_valid', 'skipped_unreachable', 'failed'}
+    if execution_state not in allowed_states:
+        raise ValueError("invalid execution state")
+    async with pool().acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE organization_plan_actions action
+            SET execution_state = $4, execution_message = $5, executed_at = NOW()
+            FROM organization_plans plan
+            WHERE action.plan_id = plan.id AND plan.uid = $1 AND action.plan_id = $2 AND action.id = $3
+              AND plan.execution_status = 'running'
+            """,
+            uid, plan_id, action_id, execution_state, message[:240],
+        )
+
+
+async def finish_organization_plan_execution(uid: str, plan_id: str, execution_status: str) -> None:
+    if execution_status not in {'completed', 'partial_failed', 'failed'}:
+        raise ValueError("invalid plan execution status")
+    async with pool().acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE organization_plans
+            SET execution_status = $3, execution_finished_at = NOW(), updated_at = NOW()
+            WHERE uid = $1 AND id = $2 AND execution_status = 'running'
+            """,
+            uid, plan_id, execution_status,
+        )

@@ -3,6 +3,7 @@ import {
   approveOrganizationPlan,
   buildLearningPath,
   buildOrganizationPlan,
+  executeOrganizationPlan,
   getKnowledgeDashboard,
   getOrganizationPlans,
   rebuildSearchIndex,
@@ -393,17 +394,22 @@ function renderOrganizationHistory(plans, el) {
 function renderOrganizationPlan(plan, el) {
   const actions = plan.actions || [];
   const isDraft = plan.status === "draft";
+  const canExecute = plan.status === "approved" && ["idle", "partial_failed", "failed"].includes(plan.execution_status || "idle");
+  const executionLabel = organizationExecutionLabel(plan.execution_status || "idle");
+  const counts = plan.execution_counts || {};
   el.innerHTML = `
     <div class="agent-answer">
       <div class="agent-kicker">Organization Plan Agent</div>
       <p><strong>${escapeHtml(plan.goal || "整理目标")}</strong></p>
       <p>${escapeHtml(plan.summary || "")}</p>
-      <small>${Number(plan.action_count || actions.length)} 项待审核</small>
+      <small>${Number(plan.action_count || actions.length)} 项待审核 · ${escapeHtml(executionLabel)}</small>
     </div>
     <div class="agent-plan-actions">
       ${actions.map(action => renderOrganizationAction(action, isDraft)).join("") || `<p class="muted">没有可审核的动作</p>`}
     </div>
+    ${Object.keys(counts).length ? `<p class="agent-execution-summary">已删除 ${Number(counts.deleted || 0)} 项，仍有效 ${Number(counts.skipped_valid || 0)} 项，无法验证 ${Number(counts.skipped_unreachable || 0)} 项，失败 ${Number(counts.failed || 0)} 项。</p>` : ""}
     ${isDraft ? `<div class="agent-plan-footer"><button id="approveOrganizationPlanBtn" class="btn">确认计划</button></div>` : ""}
+    ${canExecute ? `<div class="agent-plan-footer"><button id="executeOrganizationPlanBtn" class="btn btn-danger">执行已确认的失效项清理</button></div>` : ""}
   `;
 
   if (isDraft) {
@@ -431,11 +437,25 @@ function renderOrganizationPlan(plan, el) {
       }
     });
   }
+
+  document.getElementById("executeOrganizationPlanBtn")?.addEventListener("click", async event => {
+    if (!window.confirm("系统会再次确认每个条目已失效，只删除复核失败的条目。删除后无法恢复，是否继续？")) return;
+    try {
+      setButtonBusy(event.currentTarget, true, "复核并执行中...");
+      const updated = await executeOrganizationPlan(plan.id);
+      renderOrganizationPlan(updated, el);
+      showToast("执行完成，已保存每一项的复核结果。", "success");
+    } catch (e) {
+      showToast(formatError(e, "执行整理计划失败"), "error");
+      setButtonBusy(event.currentTarget, false);
+    }
+  });
 }
 
 function renderOrganizationAction(action, isDraft) {
   const actionName = action.action_type === "review_duplicate" ? "重复收藏复核" : "长期未处理复核";
   const stateName = action.state === "skipped" ? "已跳过" : action.state === "approved" ? "已保留" : "待审核";
+  const execution = organizationActionExecutionLabel(action.execution_state || "pending");
   return `<div class="agent-plan-action">
     <div class="agent-plan-action-head">
       <span class="agent-risk agent-risk-${escapeAttr(action.risk || "low")}">${escapeHtml(actionName)}</span>
@@ -444,11 +464,20 @@ function renderOrganizationAction(action, isDraft) {
     <a href="${escapeAttr(`https://www.bilibili.com/video/${action.bvid || ""}`)}" target="_blank" rel="noopener">${escapeHtml(action.title)}</a>
     <p>${escapeHtml(action.reason || "")}</p>
     <small>${escapeHtml(action.folder_name || "")}</small>
+    ${action.execution_state && action.execution_state !== "pending" ? `<div class="agent-execution-result"><strong>${escapeHtml(execution)}</strong><span>${escapeHtml(action.execution_message || "")}</span></div>` : ""}
     ${isDraft ? `<div class="agent-plan-action-buttons">
       <button class="btn btn-secondary" data-plan-action="skipped" data-action-id="${escapeAttr(action.id)}">跳过</button>
       <button class="btn" data-plan-action="approved" data-action-id="${escapeAttr(action.id)}">保留复核</button>
     </div>` : ""}
   </div>`;
+}
+
+function organizationExecutionLabel(state) {
+  return ({ idle: "等待执行", running: "正在执行", completed: "执行完成", partial_failed: "部分完成，可重试", failed: "执行失败，可重试" })[state] || "等待执行";
+}
+
+function organizationActionExecutionLabel(state) {
+  return ({ deleted: "已删除", skipped_valid: "仍然有效，未删除", skipped_unreachable: "无法验证，未删除", failed: "删除失败", pending: "等待执行" })[state] || "等待执行";
 }
 
 function renderLearningResult(data, el) {

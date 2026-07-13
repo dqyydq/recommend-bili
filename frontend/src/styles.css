@@ -819,6 +819,31 @@ body {
   font-size: 12px;
 }
 
+.agent-execution-summary {
+  margin: 12px 0 0;
+  color: #475569;
+  font-size: 13px;
+}
+
+.agent-execution-result {
+  display: grid;
+  gap: 3px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-left: 3px solid #8aa4c8;
+  background: #f5f8fc;
+  color: #475569;
+  font-size: 12px;
+}
+
+.btn-danger {
+  background: #b42318;
+}
+
+.btn-danger:hover {
+  background: #8f1d14;
+}
+
 .agent-risk {
   border-radius: 3px;
   font-size: 12px;
