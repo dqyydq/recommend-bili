@@ -128,6 +128,66 @@ ALTER TABLE organization_plans ADD COLUMN IF NOT EXISTS execution_finished_at TI
 ALTER TABLE organization_plan_actions ADD COLUMN IF NOT EXISTS execution_state TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE organization_plan_actions ADD COLUMN IF NOT EXISTS execution_message TEXT NOT NULL DEFAULT '';
 ALTER TABLE organization_plan_actions ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS learning_projects (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+    goal TEXT NOT NULL,
+    duration_weeks INTEGER NOT NULL CHECK (duration_weeks BETWEEN 1 AND 52),
+    weekly_minutes INTEGER NOT NULL CHECK (weekly_minutes BETWEEN 15 AND 10080),
+    status TEXT NOT NULL CHECK (status IN ('active', 'archived')) DEFAULT 'active',
+    current_week INTEGER NOT NULL DEFAULT 1,
+    summary TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS learning_projects_uid_updated_idx ON learning_projects(uid, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS learning_tasks (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES learning_projects(id) ON DELETE CASCADE,
+    week_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    rationale TEXT NOT NULL DEFAULT '',
+    favorite_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    estimated_minutes INTEGER NOT NULL DEFAULT 30,
+    state TEXT NOT NULL CHECK (state IN ('draft', 'pending', 'completed', 'skipped', 'blocked')) DEFAULT 'draft',
+    user_note TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS learning_tasks_project_week_idx ON learning_tasks(project_id, week_number, state);
+
+CREATE TABLE IF NOT EXISTS learning_progress_events (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES learning_projects(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES learning_tasks(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS learning_conversations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES learning_projects(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS learning_conversations_project_created_idx ON learning_conversations(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS learning_weekly_reviews (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES learning_projects(id) ON DELETE CASCADE,
+    week_number INTEGER NOT NULL,
+    completion_rate NUMERIC NOT NULL DEFAULT 0,
+    summary TEXT NOT NULL DEFAULT '',
+    proposed_tasks JSONB NOT NULL DEFAULT '[]'::jsonb,
+    status TEXT NOT NULL CHECK (status IN ('draft', 'confirmed')) DEFAULT 'draft',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    confirmed_at TIMESTAMPTZ,
+    UNIQUE (project_id, week_number)
+);
 """
 
 
@@ -578,3 +638,150 @@ async def finish_organization_plan_execution(uid: str, plan_id: str, execution_s
             """,
             uid, plan_id, execution_status,
         )
+
+
+def _json_value(value: Any) -> Any:
+    return json.loads(value) if isinstance(value, str) else value
+
+
+async def create_learning_project(uid: str, goal: str, duration_weeks: int, weekly_minutes: int) -> dict[str, Any]:
+    project_id = secrets.token_urlsafe(12)
+    async with pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO learning_projects (id, uid, goal, duration_weeks, weekly_minutes) VALUES ($1,$2,$3,$4,$5)",
+            project_id, uid, goal, duration_weeks, weekly_minutes,
+        )
+    return await get_learning_project(uid, project_id) or {}
+
+
+async def list_learning_projects(uid: str) -> list[dict[str, Any]]:
+    async with pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, goal, duration_weeks, weekly_minutes, status, current_week, summary, created_at, updated_at "
+            "FROM learning_projects WHERE uid = $1 ORDER BY updated_at DESC", uid,
+        )
+    return [dict(row) for row in rows]
+
+
+async def get_learning_project(uid: str, project_id: str) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        project = await conn.fetchrow("SELECT * FROM learning_projects WHERE uid = $1 AND id = $2", uid, project_id)
+        if project is None:
+            return None
+        tasks = await conn.fetch("SELECT * FROM learning_tasks WHERE project_id = $1 ORDER BY week_number, created_at", project_id)
+        reviews = await conn.fetch(
+            "SELECT id, week_number, completion_rate, summary, proposed_tasks, status, created_at, confirmed_at "
+            "FROM learning_weekly_reviews WHERE project_id = $1 ORDER BY week_number DESC", project_id,
+        )
+        messages = await conn.fetch(
+            "SELECT id, role, content, created_at FROM learning_conversations WHERE project_id = $1 "
+            "ORDER BY created_at DESC LIMIT 16", project_id,
+        )
+    data = dict(project)
+    data["tasks"] = [{**dict(row), "favorite_refs": _json_value(row["favorite_refs"])} for row in tasks]
+    data["reviews"] = [{**dict(row), "proposed_tasks": _json_value(row["proposed_tasks"])} for row in reviews]
+    data["messages"] = [dict(row) for row in reversed(messages)]
+    return data
+
+
+async def delete_learning_project(uid: str, project_id: str) -> bool:
+    async with pool().acquire() as conn:
+        result = await conn.execute("DELETE FROM learning_projects WHERE uid = $1 AND id = $2", uid, project_id)
+    return result.endswith("1")
+
+
+async def save_learning_draft_tasks(uid: str, project_id: str, week_number: int, tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            exists = await conn.fetchval("SELECT 1 FROM learning_projects WHERE uid = $1 AND id = $2 AND status = 'active'", uid, project_id)
+            if not exists:
+                return None
+            await conn.execute("DELETE FROM learning_tasks WHERE project_id = $1 AND week_number = $2 AND state = 'draft'", project_id, week_number)
+            await conn.executemany(
+                "INSERT INTO learning_tasks (id, project_id, week_number, title, rationale, favorite_refs, estimated_minutes) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)",
+                [(secrets.token_urlsafe(12), project_id, week_number, task["title"], task.get("rationale", ""),
+                  json.dumps(task.get("favorite_refs", []), ensure_ascii=False), int(task.get("estimated_minutes", 30))) for task in tasks],
+            ) if tasks else None
+            await conn.execute("UPDATE learning_projects SET updated_at = NOW() WHERE id = $1", project_id)
+    return await get_learning_project(uid, project_id)
+
+
+async def confirm_learning_week(uid: str, project_id: str, week_number: int) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            updated = await conn.execute(
+                "UPDATE learning_tasks task SET state = 'pending', updated_at = NOW() FROM learning_projects project "
+                "WHERE task.project_id = project.id AND project.uid = $1 AND task.project_id = $2 AND task.week_number = $3 AND task.state = 'draft'",
+                uid, project_id, week_number,
+            )
+            if updated.endswith("0"):
+                return None
+            await conn.execute("UPDATE learning_projects SET current_week = GREATEST(current_week, $3), updated_at = NOW() WHERE uid = $1 AND id = $2", uid, project_id, week_number)
+    return await get_learning_project(uid, project_id)
+
+
+async def update_learning_task(uid: str, project_id: str, task_id: str, state: str, note: str) -> dict[str, Any] | None:
+    if state not in {'completed', 'skipped', 'blocked', 'pending'}:
+        raise ValueError("invalid task state")
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "UPDATE learning_tasks task SET state = $4, user_note = $5, updated_at = NOW() FROM learning_projects project "
+                "WHERE task.project_id = project.id AND project.uid = $1 AND task.project_id = $2 AND task.id = $3 AND task.state <> 'draft' RETURNING task.id",
+                uid, project_id, task_id, state, note[:1000],
+            )
+            if row is None:
+                return None
+            await conn.execute("INSERT INTO learning_progress_events (id, project_id, task_id, state, note) VALUES ($1,$2,$3,$4,$5)",
+                               secrets.token_urlsafe(12), project_id, task_id, state, note[:1000])
+            await conn.execute("UPDATE learning_projects SET updated_at = NOW() WHERE id = $1", project_id)
+    return await get_learning_project(uid, project_id)
+
+
+async def append_learning_message(uid: str, project_id: str, role: str, content: str) -> bool:
+    async with pool().acquire() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM learning_projects WHERE uid = $1 AND id = $2", uid, project_id)
+        if not exists:
+            return False
+        await conn.execute("INSERT INTO learning_conversations (id, project_id, role, content) VALUES ($1,$2,$3,$4)",
+                           secrets.token_urlsafe(12), project_id, role, content[:4000])
+        await conn.execute("UPDATE learning_projects SET updated_at = NOW() WHERE id = $1", project_id)
+    return True
+
+
+async def save_learning_summary(uid: str, project_id: str, summary: str) -> None:
+    async with pool().acquire() as conn:
+        await conn.execute("UPDATE learning_projects SET summary = $3, updated_at = NOW() WHERE uid = $1 AND id = $2", uid, project_id, summary[:2000])
+
+
+async def save_weekly_review(uid: str, project_id: str, week_number: int, completion_rate: float, summary: str, proposed_tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM learning_projects WHERE uid = $1 AND id = $2", uid, project_id)
+        if not exists:
+            return None
+        await conn.execute(
+            "INSERT INTO learning_weekly_reviews (id, project_id, week_number, completion_rate, summary, proposed_tasks) VALUES ($1,$2,$3,$4,$5,$6::jsonb) "
+            "ON CONFLICT (project_id, week_number) DO UPDATE SET completion_rate = EXCLUDED.completion_rate, summary = EXCLUDED.summary, proposed_tasks = EXCLUDED.proposed_tasks, status = 'draft'",
+            secrets.token_urlsafe(12), project_id, week_number, completion_rate, summary[:3000], json.dumps(proposed_tasks, ensure_ascii=False),
+        )
+    return await get_learning_project(uid, project_id)
+
+
+async def confirm_weekly_review(uid: str, project_id: str, week_number: int) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            review = await conn.fetchrow(
+                "SELECT review.* FROM learning_weekly_reviews review JOIN learning_projects project ON project.id = review.project_id "
+                "WHERE project.uid = $1 AND review.project_id = $2 AND review.week_number = $3 AND review.status = 'draft'",
+                uid, project_id, week_number,
+            )
+            if review is None:
+                return None
+            tasks = _json_value(review["proposed_tasks"]) or []
+            await conn.executemany(
+                "INSERT INTO learning_tasks (id, project_id, week_number, title, rationale, favorite_refs, estimated_minutes, state) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,'pending')",
+                [(secrets.token_urlsafe(12), project_id, week_number + 1, task["title"], task.get("rationale", ""), json.dumps(task.get("favorite_refs", []), ensure_ascii=False), int(task.get("estimated_minutes", 30))) for task in tasks],
+            ) if tasks else None
+            await conn.execute("UPDATE learning_weekly_reviews SET status = 'confirmed', confirmed_at = NOW() WHERE id = $1", review["id"])
+            await conn.execute("UPDATE learning_projects SET current_week = $3, updated_at = NOW() WHERE uid = $1 AND id = $2", uid, project_id, week_number + 1)
+    return await get_learning_project(uid, project_id)

@@ -27,7 +27,10 @@ from database import (
     approve_organization_plan, close_db, get_favorites, get_folders, get_organization_plan,
     init_db, list_classifications, list_organization_plans, load_classification,
     mark_sync_required, record_operation, save_classification, search_favorites, set_plan_action_state,
+    confirm_learning_week, confirm_weekly_review, create_learning_project, delete_learning_project,
+    get_learning_project, list_learning_projects, update_learning_task,
 )
+from learning_project_agent import build_project_review, build_project_week, chat_with_project
 from organization_executor import execute_organization_plan
 from sync_service import start_sync
 
@@ -137,6 +140,21 @@ class OrganizationPlanRequest(BaseModel):
 
 class PlanActionStateRequest(BaseModel):
     state: str = Field(pattern="^(approved|skipped)$")
+
+
+class LearningProjectRequest(BaseModel):
+    goal: str = Field(min_length=1, max_length=500)
+    duration_weeks: int = Field(default=4, ge=1, le=52)
+    weekly_minutes: int = Field(default=180, ge=15, le=10080)
+
+
+class LearningTaskUpdateRequest(BaseModel):
+    state: str = Field(pattern="^(pending|completed|skipped|blocked)$")
+    note: str = Field(default="", max_length=1000)
+
+
+class LearningChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
 
 
 @app.get("/api/settings")
@@ -527,6 +545,91 @@ async def api_agent_learning_path(req: LearningPathRequest, session: dict = Depe
         )
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/api/agents/learning-projects")
+async def api_learning_projects(session: dict = Depends(get_session)):
+    return {"projects": await list_learning_projects(session.get("uid", ""))}
+
+
+@app.post("/api/agents/learning-projects", dependencies=[Depends(require_trusted_origin)])
+async def api_create_learning_project(req: LearningProjectRequest, session: dict = Depends(get_session)):
+    project = await create_learning_project(session.get("uid", ""), req.goal, req.duration_weeks, req.weekly_minutes)
+    await record_operation(session.get("uid", ""), "create_learning_project", {"project_id": project.get("id", "")})
+    return project
+
+
+@app.get("/api/agents/learning-projects/{project_id}")
+async def api_learning_project(project_id: str, session: dict = Depends(get_session)):
+    project = await get_learning_project(session.get("uid", ""), project_id)
+    if project is None:
+        return JSONResponse({"error": "学习项目不存在"}, status_code=404)
+    return project
+
+
+@app.delete("/api/agents/learning-projects/{project_id}", dependencies=[Depends(require_trusted_origin)])
+async def api_delete_learning_project(project_id: str, session: dict = Depends(get_session)):
+    if not await delete_learning_project(session.get("uid", ""), project_id):
+        return JSONResponse({"error": "学习项目不存在"}, status_code=404)
+    await record_operation(session.get("uid", ""), "delete_learning_project", {"project_id": project_id})
+    return {"success": True}
+
+
+@app.post("/api/agents/learning-projects/{project_id}/plan", dependencies=[Depends(require_trusted_origin)])
+async def api_learning_project_plan(project_id: str, session: dict = Depends(get_session)):
+    api_key = session.get("deepseek_key", "")
+    if not api_key:
+        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
+    project = await build_project_week(session.get("uid", ""), project_id, session.get("bili_cookies", {}), api_key, session.get("model", "deepseek-chat"))
+    if project is None:
+        return JSONResponse({"error": "学习项目不存在"}, status_code=404)
+    return project
+
+
+@app.post("/api/agents/learning-projects/{project_id}/weeks/{week_number}/confirm", dependencies=[Depends(require_trusted_origin)])
+async def api_confirm_learning_week(project_id: str, week_number: int, session: dict = Depends(get_session)):
+    project = await confirm_learning_week(session.get("uid", ""), project_id, week_number)
+    if project is None:
+        return JSONResponse({"error": "没有可确认的计划草稿"}, status_code=409)
+    return project
+
+
+@app.post("/api/agents/learning-projects/{project_id}/tasks/{task_id}", dependencies=[Depends(require_trusted_origin)])
+async def api_update_learning_task(project_id: str, task_id: str, req: LearningTaskUpdateRequest, session: dict = Depends(get_session)):
+    project = await update_learning_task(session.get("uid", ""), project_id, task_id, req.state, req.note)
+    if project is None:
+        return JSONResponse({"error": "任务不存在或尚未确认"}, status_code=404)
+    return project
+
+
+@app.post("/api/agents/learning-projects/{project_id}/chat", dependencies=[Depends(require_trusted_origin)])
+async def api_learning_project_chat(project_id: str, req: LearningChatRequest, session: dict = Depends(get_session)):
+    api_key = session.get("deepseek_key", "")
+    if not api_key:
+        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
+    project = await chat_with_project(session.get("uid", ""), project_id, session.get("bili_cookies", {}), req.message, api_key, session.get("model", "deepseek-chat"))
+    if project is None:
+        return JSONResponse({"error": "学习项目不存在"}, status_code=404)
+    return project
+
+
+@app.post("/api/agents/learning-projects/{project_id}/review", dependencies=[Depends(require_trusted_origin)])
+async def api_learning_project_review(project_id: str, session: dict = Depends(get_session)):
+    api_key = session.get("deepseek_key", "")
+    if not api_key:
+        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
+    project = await build_project_review(session.get("uid", ""), project_id, session.get("bili_cookies", {}), api_key, session.get("model", "deepseek-chat"))
+    if project is None:
+        return JSONResponse({"error": "学习项目不存在"}, status_code=404)
+    return project
+
+
+@app.post("/api/agents/learning-projects/{project_id}/reviews/{week_number}/confirm", dependencies=[Depends(require_trusted_origin)])
+async def api_confirm_learning_review(project_id: str, week_number: int, session: dict = Depends(get_session)):
+    project = await confirm_weekly_review(session.get("uid", ""), project_id, week_number)
+    if project is None:
+        return JSONResponse({"error": "没有可确认的周回顾草稿"}, status_code=409)
+    return project
 
 
 @app.post("/api/agents/organization-plans", dependencies=[Depends(require_trusted_origin)])

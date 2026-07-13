@@ -125,6 +125,18 @@ export function buildLearningPath(goal, options = {}) {
   });
 }
 
+export function getLearningProjects() { return request("/agents/learning-projects"); }
+export function getLearningProject(id) { return request(`/agents/learning-projects/${encodeURIComponent(id)}`); }
+export function createLearningProject(goal, durationWeeks, weeklyMinutes) {
+  return request("/agents/learning-projects", { method: "POST", body: JSON.stringify({ goal, duration_weeks: durationWeeks, weekly_minutes: weeklyMinutes }) });
+}
+export function buildLearningProjectPlan(id) { return request(`/agents/learning-projects/${encodeURIComponent(id)}/plan`, { method: "POST" }); }
+export function confirmLearningProjectWeek(id, week) { return request(`/agents/learning-projects/${encodeURIComponent(id)}/weeks/${week}/confirm`, { method: "POST" }); }
+export function updateLearningProjectTask(id, taskId, state, note = "") { return request(`/agents/learning-projects/${encodeURIComponent(id)}/tasks/${encodeURIComponent(taskId)}`, { method: "POST", body: JSON.stringify({ state, note }) }); }
+export function chatLearningProject(id, message) { return request(`/agents/learning-projects/${encodeURIComponent(id)}/chat`, { method: "POST", body: JSON.stringify({ message }) }); }
+export function reviewLearningProject(id) { return request(`/agents/learning-projects/${encodeURIComponent(id)}/review`, { method: "POST" }); }
+export function confirmLearningProjectReview(id, week) { return request(`/agents/learning-projects/${encodeURIComponent(id)}/reviews/${week}/confirm`, { method: "POST" }); }
+
 export function buildOrganizationPlan(goal, maxActions = 12) {
   return request("/agents/organization-plans", {
     method: "POST",

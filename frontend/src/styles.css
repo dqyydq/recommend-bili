@@ -773,6 +773,68 @@ body {
   margin-top: 14px;
 }
 
+.learning-project-card,
+.learning-task {
+  width: 100%;
+  border: 1px solid #e4e6eb;
+  background: #fff;
+  border-radius: 6px;
+  padding: 14px;
+  text-align: left;
+}
+
+.learning-project-card {
+  cursor: pointer;
+}
+
+.learning-project-card span,
+.learning-task small,
+.learning-task a {
+  display: block;
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.learning-task-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.learning-task p,
+.learning-project-head p {
+  margin: 6px 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.learning-task button {
+  margin: 10px 6px 0 0;
+}
+
+.learning-project-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.learning-chat {
+  margin-top: 14px;
+  border-top: 1px solid #e4e6eb;
+  padding-top: 14px;
+}
+
+.learning-chat p {
+  margin: 7px 0;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.chat-user { background: #eef6ff; }
+.chat-assistant { background: #f8fafc; }
+.project-number { max-width: 88px; }
+
 .agent-plan-action,
 .agent-plan-card {
   border: 1px solid #e4e6eb;

@@ -3,12 +3,21 @@ import {
   approveOrganizationPlan,
   buildLearningPath,
   buildOrganizationPlan,
+  buildLearningProjectPlan,
+  chatLearningProject,
+  confirmLearningProjectReview,
+  confirmLearningProjectWeek,
+  createLearningProject,
   executeOrganizationPlan,
   getKnowledgeDashboard,
+  getLearningProject,
+  getLearningProjects,
   getOrganizationPlans,
   rebuildSearchIndex,
   semanticSearch,
   updateOrganizationPlanAction,
+  updateLearningProjectTask,
+  reviewLearningProject,
 } from "./api.js";
 import { escapeAttr, escapeHtml, formatError, setButtonBusy, showInlineMessage, showToast } from "./ui.js";
 
@@ -20,6 +29,7 @@ export function renderAgentsModule(container) {
         <div class="tab" data-agent-tab="profile">收藏人格</div>
         <div class="tab" data-agent-tab="retrieval">智能检索</div>
         <div class="tab" data-agent-tab="learning">学习路线</div>
+        <div class="tab" data-agent-tab="projects">学习项目</div>
         <div class="tab" data-agent-tab="organization">整理计划</div>
       </div>
       <div id="agentContent"></div>
@@ -35,6 +45,7 @@ export function renderAgentsModule(container) {
       if (tab.dataset.agentTab === "profile") renderProfileAgent(content);
       if (tab.dataset.agentTab === "retrieval") renderRetrievalAgent(content);
       if (tab.dataset.agentTab === "learning") renderLearningAgent(content);
+      if (tab.dataset.agentTab === "projects") renderLearningProjectsAgent(content);
       if (tab.dataset.agentTab === "organization") renderOrganizationAgent(content);
     });
   });
@@ -325,6 +336,60 @@ function renderLearningAgent(el) {
   input.addEventListener("keydown", e => {
     if (e.key === "Enter") run(false);
   });
+}
+
+function renderLearningProjectsAgent(el) {
+  el.innerHTML = `
+    <div class="agent-toolbar">
+      <input id="projectGoalInput" class="input" style="flex:1" placeholder="例如：4 周掌握 FastAPI 项目开发" />
+      <input id="projectWeeksInput" class="input project-number" type="number" min="1" max="52" value="4" title="学习周期（周）" />
+      <input id="projectMinutesInput" class="input project-number" type="number" min="15" max="10080" value="180" title="每周分钟数" />
+      <button id="createProjectBtn" class="btn">创建项目</button>
+    </div>
+    <div id="learningProjectsResult"></div>`;
+  const result = document.getElementById("learningProjectsResult");
+  const load = async () => {
+    try {
+      const data = await getLearningProjects();
+      result.innerHTML = `<div class="agent-plan-list">${(data.projects || []).map(project => `<button class="learning-project-card" data-project-id="${escapeAttr(project.id)}"><strong>${escapeHtml(project.goal)}</strong><span>第 ${Number(project.current_week)} 周 · ${Number(project.weekly_minutes)} 分钟/周</span></button>`).join("") || "<p class=\"muted\">创建一个目标，让 Agent 从收藏中排出第一周任务。</p>"}</div>`;
+      result.querySelectorAll("[data-project-id]").forEach(button => button.addEventListener("click", () => openProject(button.dataset.projectId)));
+    } catch (e) { showInlineMessage(result, formatError(e, "学习项目加载失败")); }
+  };
+  const openProject = async id => {
+    try {
+      const data = await getLearningProject(id);
+      renderLearningProjectDetail(data, result, openProject);
+    } catch (e) { showInlineMessage(result, formatError(e, "项目加载失败")); }
+  };
+  document.getElementById("createProjectBtn").addEventListener("click", async () => {
+    const goal = document.getElementById("projectGoalInput").value.trim();
+    if (!goal) return showToast("先写下一个学习目标", "error");
+    try {
+      const project = await createLearningProject(goal, Number(document.getElementById("projectWeeksInput").value), Number(document.getElementById("projectMinutesInput").value));
+      renderLearningProjectDetail(project, result, openProject);
+    } catch (e) { showInlineMessage(result, formatError(e, "创建项目失败")); }
+  });
+  load();
+}
+
+function renderLearningProjectDetail(project, el, reload) {
+  const week = Number(project.current_week || 1);
+  const tasks = (project.tasks || []).filter(task => Number(task.week_number) === week);
+  const review = (project.reviews || []).find(item => Number(item.week_number) === week && item.status === "draft");
+  el.innerHTML = `<div class="learning-project-head"><div><strong>${escapeHtml(project.goal)}</strong><p>第 ${week} 周 · ${Number(project.weekly_minutes)} 分钟预算</p></div><button id="projectPlanBtn" class="btn">生成本周草稿</button></div>
+    <div class="learning-task-list">${tasks.map(task => `<div class="learning-task"><strong>${escapeHtml(task.title)}</strong><p>${escapeHtml(task.rationale || "")}</p><small>${Number(task.estimated_minutes)} 分钟 · ${escapeHtml(task.state)}</small>${task.favorite_refs?.map(ref => `<a href="${escapeAttr(ref.link || "#")}" target="_blank" rel="noopener">${escapeHtml(ref.title || "相关收藏")}</a>`).join("") || ""}${task.state === "pending" || task.state === "blocked" ? `<div><button data-task="completed" data-task-id="${escapeAttr(task.id)}" class="btn">完成</button><button data-task="blocked" data-task-id="${escapeAttr(task.id)}" class="btn btn-secondary">卡住</button></div>` : ""}</div>`).join("") || "<p class=\"muted\">先生成本周任务草稿。</p>"}</div>
+    ${tasks.some(t => t.state === "draft") ? `<div class="agent-plan-footer"><button id="confirmWeekBtn" class="btn">确认本周任务</button></div>` : ""}
+    <div class="learning-chat"><div>${(project.messages || []).map(m => `<p class="chat-${escapeAttr(m.role)}">${escapeHtml(m.content)}</p>`).join("")}</div><div class="agent-toolbar"><input id="projectChatInput" class="input" placeholder="例如：我卡在依赖注入，下一步怎么做？" /><button id="projectChatBtn" class="btn">问 Agent</button></div></div>
+    <div class="agent-plan-footer"><button id="reviewProjectBtn" class="btn btn-secondary">生成本周回顾</button>${review ? `<button id="confirmReviewBtn" class="btn">确认下周计划</button>` : ""}</div>${review ? `<div class="agent-answer"><strong>本周回顾</strong><p>${escapeHtml(review.summary)}</p></div>` : ""}`;
+  document.getElementById("projectPlanBtn").onclick = async e => { setButtonBusy(e.currentTarget, true, "生成中…"); renderLearningProjectDetail(await buildLearningProjectPlan(project.id), el, reload); };
+  document.getElementById("confirmWeekBtn")?.addEventListener("click", async () => renderLearningProjectDetail(await confirmLearningProjectWeek(project.id, week), el, reload));
+  el.querySelectorAll("[data-task]").forEach(button => button.addEventListener("click", async () => {
+    const note = button.dataset.task === "blocked" ? (window.prompt("哪里卡住了？这会帮助 Agent 在回顾时调整计划。") || "") : "";
+    renderLearningProjectDetail(await updateLearningProjectTask(project.id, button.dataset.taskId, button.dataset.task, note), el, reload);
+  }));
+  document.getElementById("projectChatBtn").onclick = async () => { const text = document.getElementById("projectChatInput").value.trim(); if (text) renderLearningProjectDetail(await chatLearningProject(project.id, text), el, reload); };
+  document.getElementById("reviewProjectBtn").onclick = async () => renderLearningProjectDetail(await reviewLearningProject(project.id), el, reload);
+  document.getElementById("confirmReviewBtn")?.addEventListener("click", async () => renderLearningProjectDetail(await confirmLearningProjectReview(project.id, week), el, reload));
 }
 
 function renderOrganizationAgent(el) {
