@@ -1,4 +1,4 @@
-import { getSettings, getSyncStatus, logout, setApiKey, setModel, startSync } from "./api.js";
+import { clearAgentMemories, exportUserData, getSettings, getSyncStatus, logout, setApiKey, setModel, startSync } from "./api.js";
 import { renderLearningProjectsAgent } from "./agents-module.js";
 import { renderCollectionLibrary } from "./collection-library.js";
 import { renderOperationsModule } from "./operations-module.js";
@@ -105,10 +105,12 @@ function showSettingsModal() {
   modal.innerHTML = `
     <div class="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
       <div class="modal-heading"><div><span class="eyebrow">模型连接</span><h2 id="settingsTitle">设置</h2></div><button id="closeSettingsBtn" class="icon-button" type="button" aria-label="关闭">×</button></div>
-      <label class="form-field"><span>DeepSeek API Key</span><input id="settingsKeyInput" class="input" type="password" autocomplete="off" placeholder="sk-..." /></label>
+      <label class="form-field"><span>模型 API Key</span><input id="settingsKeyInput" class="input" type="password" autocomplete="off" placeholder="sk-..." /></label>
+      <label class="form-field"><span>OpenAI-compatible Base URL</span><input id="settingsBaseUrlInput" class="input" placeholder="https://api.deepseek.com" /></label>
       <label class="form-field"><span>模型</span><input id="settingsModelInput" class="input" list="modelPresets" placeholder="deepseek-v4-flash" /></label>
       <datalist id="modelPresets"><option value="deepseek-v4-flash"><option value="deepseek-chat"><option value="deepseek-reasoner"></datalist>
       <p id="settingsError" class="inline-error" hidden></p>
+      <div class="settings-data-actions"><button id="exportDataButton" class="text-button" type="button">导出我的数据</button><button id="clearMemoriesButton" class="text-button danger-text" type="button">清空 Agent 记忆</button></div>
       <div class="modal-actions"><button id="cancelSettingsBtn" class="btn btn-secondary" type="button">取消</button><button id="saveSettingsBtn" class="btn" type="button">保存</button></div>
     </div>`;
   document.body.appendChild(modal);
@@ -116,11 +118,13 @@ function showSettingsModal() {
 
   const keyInput = document.getElementById("settingsKeyInput");
   const modelInput = document.getElementById("settingsModelInput");
+  const baseUrlInput = document.getElementById("settingsBaseUrlInput");
   let maskedKey = "";
   getSettings().then(data => {
     maskedKey = data.api_key || "";
     keyInput.value = maskedKey;
     modelInput.value = data.model || "deepseek-v4-flash";
+    baseUrlInput.value = data.base_url || "https://api.deepseek.com";
   }).catch(() => {});
   keyInput.addEventListener("focus", () => { if (maskedKey && keyInput.value === maskedKey && maskedKey.includes("*")) keyInput.value = ""; });
 
@@ -137,12 +141,28 @@ function showSettingsModal() {
       setButtonBusy(saveButton, true, "保存中…");
       const key = keyInput.value.trim();
       if (key && !key.includes("*")) await setApiKey(key);
-      await setModel(modelInput.value.trim() || "deepseek-v4-flash");
+      await setModel(modelInput.value.trim() || "deepseek-v4-flash", baseUrlInput.value.trim() || "https://api.deepseek.com");
       close();
       showToast("设置已保存", "success");
     } catch (error) {
       errorElement.textContent = `保存失败：${error.message}`;
       errorElement.hidden = false;
     } finally { setButtonBusy(saveButton, false); }
+  });
+  document.getElementById("exportDataButton").addEventListener("click", async () => {
+    try {
+      const data = await exportUserData();
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+      link.download = `favorite-agent-export-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (error) { showToast(`导出失败：${error.message}`, "error"); }
+  });
+  document.getElementById("clearMemoriesButton").addEventListener("click", async () => {
+    const confirmation = window.prompt("输入 CLEAR MEMORIES 清空长期记忆。收藏数据不会删除。") || "";
+    if (!confirmation) return;
+    try { const data = await clearAgentMemories(confirmation); showToast(`已清空 ${Number(data.cleared || 0)} 条记忆`, "success"); }
+    catch (error) { showToast(`清空失败：${error.message}`, "error"); }
   });
 }

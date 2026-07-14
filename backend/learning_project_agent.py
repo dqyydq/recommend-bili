@@ -1,9 +1,8 @@
 from typing import Any
 
-from openai import AsyncOpenAI
-
-from agents import DEEPSEEK_BASE_URL, _json_from_text, semantic_search_favorites
+from agents import _json_from_text, semantic_search_favorites
 from database import append_learning_message, get_learning_project, save_learning_draft_tasks, save_learning_summary, save_weekly_review
+from model_provider import create_model_provider
 
 
 def _fallback_tasks(results: list[dict[str, Any]], weekly_minutes: int) -> list[dict[str, Any]]:
@@ -60,13 +59,13 @@ def adjust_proposed_tasks(tasks: list[dict[str, Any]], blocked_count: int) -> li
     return adjusted
 
 
-async def build_project_week(uid: str, project_id: str, cookies: dict, api_key: str, model: str, week_number: int | None = None) -> dict[str, Any] | None:
+async def build_project_week(uid: str, project_id: str, cookies: dict, api_key: str, model: str, week_number: int | None = None, base_url: str | None = None) -> dict[str, Any] | None:
     project = await get_learning_project(uid, project_id)
     if project is None:
         return None
     week = week_number or int(project["current_week"])
     saved_refs = list((project.get("context") or {}).get("favorite_refs") or [])
-    search = await semantic_search_favorites(uid, cookies, project["goal"], api_key, model, top_k=10)
+    search = await semantic_search_favorites(uid, cookies, project["goal"], api_key, model, top_k=10, base_url=base_url)
     seen = {str(item.get("bvid") or "") for item in saved_refs}
     results = saved_refs + [item for item in search.get("results", []) if str(item.get("bvid") or "") not in seen]
     tasks = _fallback_tasks(results, int(project["weekly_minutes"]))
@@ -78,20 +77,19 @@ async def build_project_week(uid: str, project_id: str, cookies: dict, api_key: 
             + "\n".join(f"{item['bvid']} | {item['title']}" for item in results)
         )
         try:
-            client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
-            response = await client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], max_tokens=900, temperature=0.35)
-            parsed = _json_from_text(response.choices[0].message.content or "") or {}
+            provider = create_model_provider(api_key, model, base_url)
+            parsed = _json_from_text(await provider.complete([{"role": "user", "content": prompt}], max_tokens=900, temperature=0.35)) or {}
             tasks = _allowed_tasks(parsed.get("tasks"), results, int(project["weekly_minutes"]))
         except Exception as exc:
             print(f"[learning_project] plan fallback: {exc}")
     return await save_learning_draft_tasks(uid, project_id, week, tasks)
 
 
-async def chat_with_project(uid: str, project_id: str, cookies: dict, message: str, api_key: str, model: str) -> dict[str, Any] | None:
+async def chat_with_project(uid: str, project_id: str, cookies: dict, message: str, api_key: str, model: str, base_url: str | None = None) -> dict[str, Any] | None:
     project = await get_learning_project(uid, project_id)
     if project is None or not await append_learning_message(uid, project_id, "user", message):
         return None
-    search = await semantic_search_favorites(uid, cookies, message, api_key, model, top_k=6)
+    search = await semantic_search_favorites(uid, cookies, message, api_key, model, top_k=6, base_url=base_url)
     recent = project.get("messages", [])[-10:]
     tasks = [task for task in project.get("tasks", []) if task.get("week_number") == project.get("current_week")]
     prompt = (
@@ -102,9 +100,8 @@ async def chat_with_project(uid: str, project_id: str, cookies: dict, message: s
         f"Retrieved favorites: {[(r['title'], r['link']) for r in search.get('results', [])]}\nUser: {message}"
     )
     try:
-        client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
-        response = await client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], max_tokens=600, temperature=0.55)
-        answer = (response.choices[0].message.content or "").strip()
+        provider = create_model_provider(api_key, model, base_url)
+        answer = await provider.complete([{"role": "user", "content": prompt}], max_tokens=600, temperature=0.55)
     except Exception as exc:
         print(f"[learning_project] chat fallback: {exc}")
         answer = "我已记下你的问题。先从本周最小的一项任务开始，完成后告诉我哪里卡住了。"
@@ -113,14 +110,14 @@ async def chat_with_project(uid: str, project_id: str, cookies: dict, message: s
     return await get_learning_project(uid, project_id)
 
 
-async def build_project_review(uid: str, project_id: str, cookies: dict, api_key: str, model: str) -> dict[str, Any] | None:
+async def build_project_review(uid: str, project_id: str, cookies: dict, api_key: str, model: str, base_url: str | None = None) -> dict[str, Any] | None:
     project = await get_learning_project(uid, project_id)
     if project is None:
         return None
     week = int(project["current_week"])
     tasks = [task for task in project.get("tasks", []) if task.get("week_number") == week and task.get("state") != "draft"]
     rate, summary, blocked_count = build_review_summary(week, tasks)
-    next_search = await semantic_search_favorites(uid, cookies, project["goal"], api_key, model, top_k=8)
+    next_search = await semantic_search_favorites(uid, cookies, project["goal"], api_key, model, top_k=8, base_url=base_url)
     proposed = _fallback_tasks(next_search.get("results", []), int(project["weekly_minutes"]))
     proposed = adjust_proposed_tasks(proposed, blocked_count)
     return await save_weekly_review(uid, project_id, week, rate, summary, proposed)

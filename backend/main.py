@@ -38,6 +38,7 @@ from database import (
     create_user_memory, delete_user_memory, get_agent_session, get_user_memory, list_agent_sessions,
     list_user_memories, save_favorite_feedback, update_user_memory,
     archive_learning_project,
+    clear_user_memories, export_user_data, list_proactive_suggestions, pool, update_proactive_suggestion,
 )
 from folder_structure_agent import build_folder_structure_plan
 from learning_project_agent import build_project_review, build_project_week, chat_with_project
@@ -46,6 +47,10 @@ from sync_service import start_sync
 from topic_analysis import run_topic_analysis, snapshot_version
 from memory_service import present_memory, validate_memory_state, validate_memory_update
 from harness import favorite_harness
+from model_provider import DEFAULT_MODEL_BASE_URL, create_model_provider
+from embedding import EMBEDDING_MODEL, EMBEDDING_PROVIDER, configured_embedding_collection_suffix
+from scheduler import scheduler_loop
+from demo import DEMO_UID, seed_demo_data
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
 ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
@@ -56,10 +61,16 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_database() -> None:
     await init_db()
+    app.state.scheduler_stop = asyncio.Event()
+    app.state.scheduler_task = asyncio.create_task(scheduler_loop(app.state.scheduler_stop))
 
 
 @app.on_event("shutdown")
 async def shutdown_database() -> None:
+    if hasattr(app.state, "scheduler_stop"):
+        app.state.scheduler_stop.set()
+    if hasattr(app.state, "scheduler_task"):
+        await app.state.scheduler_task
     await close_db()
 
 
@@ -77,12 +88,45 @@ def require_trusted_origin(request: Request) -> None:
     if origin and origin not in ALLOWED_ORIGINS:
         raise HTTPException(status_code=403, detail="不受信任的请求来源")
 
+
+@app.get("/api/health")
+async def api_health():
+    database_status = "ok"
+    try:
+        await pool().fetchval("SELECT 1")
+    except Exception:
+        database_status = "unavailable"
+    return {
+        "status": "ok" if database_status == "ok" else "degraded",
+        "database": database_status,
+        "embedding_provider": EMBEDDING_PROVIDER,
+        "embedding_model": EMBEDDING_MODEL,
+        "embedding_index_suffix": configured_embedding_collection_suffix(),
+        "demo_mode": os.getenv("DEMO_MODE", "false").lower() in {"1", "true", "yes"},
+    }
+
 # ---------- 登录 ----------
 
 @app.post("/api/auth/qrcode")
 async def auth_qrcode():
     result = await generate_qrcode()
     return result
+
+
+@app.post("/api/demo/session", dependencies=[Depends(require_trusted_origin)])
+async def demo_session():
+    if os.getenv("DEMO_MODE", "false").lower() not in {"1", "true", "yes"}:
+        raise HTTPException(status_code=404, detail="演示模式未启用")
+    await seed_demo_data()
+    session_id = os.urandom(16).hex()
+    sessions[session_id] = {
+        "bili_cookies": {}, "deepseek_key": "", "model": "deepseek-v4-flash",
+        "model_base_url": DEFAULT_MODEL_BASE_URL, "uid": DEMO_UID, "nickname": "演示用户", "avatar": "",
+        "folders": [], "created_at": time.time(), "expires_at": time.time() + 86400,
+    }
+    response = JSONResponse({"success": True})
+    response.set_cookie("session_id", session_id, httponly=True, max_age=86400, samesite="lax", secure=COOKIE_SECURE, path="/")
+    return response
 
 
 @app.get("/api/auth/qrcode/{key}/poll")
@@ -124,6 +168,7 @@ async def me(request: Request):
         "nickname": s.get("nickname", ""),
         "avatar": s.get("avatar", ""),
         "model": s.get("model", "deepseek-v4-flash"),
+        "model_base_url": s.get("model_base_url", DEFAULT_MODEL_BASE_URL),
     }
 
 
@@ -133,6 +178,7 @@ class KeyRequest(BaseModel):
 
 class ModelRequest(BaseModel):
     model: str = Field(min_length=1, max_length=100)
+    base_url: str | None = Field(default=None, min_length=8, max_length=500)
 
 
 class SemanticSearchRequest(BaseModel):
@@ -228,6 +274,14 @@ class HarnessChatRequest(BaseModel):
     project_id: str | None = Field(default=None, max_length=100)
 
 
+class SuggestionUpdateRequest(BaseModel):
+    status: str = Field(pattern="^(accepted|dismissed)$")
+
+
+class ClearMemoriesRequest(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=40)
+
+
 @app.get("/api/settings")
 async def api_settings(session: dict = Depends(get_session)):
     key = session.get("deepseek_key", "")
@@ -235,6 +289,7 @@ async def api_settings(session: dict = Depends(get_session)):
     return {
         "api_key": masked,
         "model": session.get("model", "deepseek-v4-flash"),
+        "base_url": session.get("model_base_url", DEFAULT_MODEL_BASE_URL),
     }
 
 
@@ -247,7 +302,13 @@ async def settings_key(req: KeyRequest, session: dict = Depends(get_session)):
 
 @app.post("/api/settings/model", dependencies=[Depends(require_trusted_origin)])
 async def settings_model(req: ModelRequest, session: dict = Depends(get_session)):
+    base_url = req.base_url or session.get("model_base_url", DEFAULT_MODEL_BASE_URL)
+    try:
+        create_model_provider(session.get("deepseek_key", "placeholder-key"), req.model, base_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     session["model"] = req.model
+    session["model_base_url"] = base_url.rstrip("/")
     on_session_updated(session)
     return {"success": True}
 
@@ -321,7 +382,7 @@ async def api_analyze(request: Request, folder_id: int | None = None, session: d
             yield f"event: classifying\ndata: {json.dumps({'total': len(all_items)})}\n\n"
 
             model = session.get("model", "deepseek-v4-flash")
-            result = await classify_favorites(all_items, api_key, model=model)
+            result = await classify_favorites(all_items, api_key, model=model, base_url=session.get("model_base_url", DEFAULT_MODEL_BASE_URL))
             yield f"event: result\ndata: {json.dumps(result)}\n\n"
 
         except Exception as e:
@@ -339,14 +400,15 @@ async def api_create_topic_analysis(req: TopicAnalysisRequest, session: dict = D
     if not items:
         raise HTTPException(status_code=409, detail="本地收藏快照为空，请先执行同步")
     api_key = session.get("deepseek_key", "")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="请先配置模型 API Key")
     version = snapshot_version(items)
     if req.force:
         version = f"{version}-{int(time.time())}"
     analysis, cached = await create_topic_analysis(uid, req.folder_id, version, len(items))
     if analysis["status"] == "queued":
-        asyncio.create_task(run_topic_analysis(analysis["id"], items, api_key, session.get("model", "deepseek-v4-flash")))
+        asyncio.create_task(run_topic_analysis(
+            analysis["id"], items, api_key, session.get("model", "deepseek-v4-flash"),
+            session.get("model_base_url", DEFAULT_MODEL_BASE_URL),
+        ))
     return {"analysis": analysis, "cached": cached}
 
 
@@ -703,7 +765,7 @@ async def api_agent_chat(req: HarnessChatRequest, session: dict = Depends(get_se
         return await favorite_harness.chat(
             uid=session.get("uid", ""), cookies=session.get("bili_cookies", {}), message=req.message,
             api_key=session.get("deepseek_key", ""), model=session.get("model", "deepseek-v4-flash"),
-            session_id=req.session_id, project_id=req.project_id,
+            session_id=req.session_id, project_id=req.project_id, base_url=session.get("model_base_url", DEFAULT_MODEL_BASE_URL),
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -725,6 +787,36 @@ async def api_agent_session(session_id: str, session: dict = Depends(get_session
 async def api_agent_memories(include_outdated: bool = True, session: dict = Depends(get_session)):
     memories = await list_user_memories(session.get("uid", ""), include_outdated=include_outdated)
     return {"memories": [present_memory(memory) for memory in memories]}
+
+
+@app.post("/api/agents/memories/clear", dependencies=[Depends(require_trusted_origin)])
+async def api_clear_agent_memories(req: ClearMemoriesRequest, session: dict = Depends(get_session)):
+    if req.confirmation != "CLEAR MEMORIES":
+        raise HTTPException(status_code=422, detail="请输入 CLEAR MEMORIES 确认清空")
+    count = await clear_user_memories(session.get("uid", ""))
+    return {"cleared": count}
+
+
+@app.get("/api/agents/suggestions")
+async def api_agent_suggestions(session: dict = Depends(get_session)):
+    return {"suggestions": await list_proactive_suggestions(session.get("uid", ""))}
+
+
+@app.post("/api/agents/suggestions/{suggestion_id}", dependencies=[Depends(require_trusted_origin)])
+async def api_update_agent_suggestion(suggestion_id: str, req: SuggestionUpdateRequest, session: dict = Depends(get_session)):
+    suggestion = await update_proactive_suggestion(session.get("uid", ""), suggestion_id, req.status)
+    if suggestion is None:
+        raise HTTPException(status_code=404, detail="建议不存在或已经处理")
+    return {"suggestion": suggestion}
+
+
+@app.get("/api/data/export")
+async def api_export_data(session: dict = Depends(get_session)):
+    return {
+        "exported_at": datetime.now(timezone.utc),
+        "schema_version": "0.2.0-harness",
+        "data": await export_user_data(session.get("uid", "")),
+    }
 
 
 @app.post("/api/agents/memories", dependencies=[Depends(require_trusted_origin)])
@@ -812,15 +904,16 @@ async def api_agent_dashboard(session: dict = Depends(get_session)):
 @app.get("/api/agents/profile")
 async def api_agent_profile(session: dict = Depends(get_session)):
     api_key = session.get("deepseek_key", "")
-    if not api_key:
-        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
     try:
         cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
         folders = await get_folders(uid)
         session["folders"] = folders
         model = session.get("model", "deepseek-v4-flash")
-        return await analyze_favorite_profile(uid, cookies, api_key, model, folders=folders)
+        return await analyze_favorite_profile(
+            uid, cookies, api_key, model, folders=folders,
+            base_url=session.get("model_base_url", DEFAULT_MODEL_BASE_URL),
+        )
     except Exception as e:
         return {"error": str(e)}
 
@@ -828,8 +921,6 @@ async def api_agent_profile(session: dict = Depends(get_session)):
 @app.post("/api/agents/learning-path")
 async def api_agent_learning_path(req: LearningPathRequest, session: dict = Depends(get_session)):
     api_key = session.get("deepseek_key", "")
-    if not api_key:
-        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
     try:
         cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
@@ -844,6 +935,7 @@ async def api_agent_learning_path(req: LearningPathRequest, session: dict = Depe
             model,
             folders=folders,
             refresh=req.refresh,
+            base_url=session.get("model_base_url", DEFAULT_MODEL_BASE_URL),
         )
     except Exception as e:
         return {"error": str(e)}
@@ -903,9 +995,7 @@ async def api_delete_learning_project(project_id: str, session: dict = Depends(g
 @app.post("/api/agents/learning-projects/{project_id}/plan", dependencies=[Depends(require_trusted_origin)])
 async def api_learning_project_plan(project_id: str, session: dict = Depends(get_session)):
     api_key = session.get("deepseek_key", "")
-    if not api_key:
-        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
-    project = await build_project_week(session.get("uid", ""), project_id, session.get("bili_cookies", {}), api_key, session.get("model", "deepseek-chat"))
+    project = await build_project_week(session.get("uid", ""), project_id, session.get("bili_cookies", {}), api_key, session.get("model", "deepseek-chat"), base_url=session.get("model_base_url", DEFAULT_MODEL_BASE_URL))
     if project is None:
         return JSONResponse({"error": "学习项目不存在"}, status_code=404)
     return project
@@ -930,9 +1020,7 @@ async def api_update_learning_task(project_id: str, task_id: str, req: LearningT
 @app.post("/api/agents/learning-projects/{project_id}/chat", dependencies=[Depends(require_trusted_origin)])
 async def api_learning_project_chat(project_id: str, req: LearningChatRequest, session: dict = Depends(get_session)):
     api_key = session.get("deepseek_key", "")
-    if not api_key:
-        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
-    project = await chat_with_project(session.get("uid", ""), project_id, session.get("bili_cookies", {}), req.message, api_key, session.get("model", "deepseek-chat"))
+    project = await chat_with_project(session.get("uid", ""), project_id, session.get("bili_cookies", {}), req.message, api_key, session.get("model", "deepseek-chat"), base_url=session.get("model_base_url", DEFAULT_MODEL_BASE_URL))
     if project is None:
         return JSONResponse({"error": "学习项目不存在"}, status_code=404)
     return project
@@ -941,9 +1029,7 @@ async def api_learning_project_chat(project_id: str, req: LearningChatRequest, s
 @app.post("/api/agents/learning-projects/{project_id}/review", dependencies=[Depends(require_trusted_origin)])
 async def api_learning_project_review(project_id: str, session: dict = Depends(get_session)):
     api_key = session.get("deepseek_key", "")
-    if not api_key:
-        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
-    project = await build_project_review(session.get("uid", ""), project_id, session.get("bili_cookies", {}), api_key, session.get("model", "deepseek-chat"))
+    project = await build_project_review(session.get("uid", ""), project_id, session.get("bili_cookies", {}), api_key, session.get("model", "deepseek-chat"), base_url=session.get("model_base_url", DEFAULT_MODEL_BASE_URL))
     if project is None:
         return JSONResponse({"error": "学习项目不存在"}, status_code=404)
     return project
@@ -960,8 +1046,6 @@ async def api_confirm_learning_review(project_id: str, week_number: int, session
 @app.post("/api/agents/organization-plans", dependencies=[Depends(require_trusted_origin)])
 async def api_organization_plan(req: OrganizationPlanRequest, session: dict = Depends(get_session)):
     api_key = session.get("deepseek_key", "")
-    if not api_key:
-        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
     try:
         return await build_organization_plan(
             session.get("uid", ""),
@@ -969,6 +1053,7 @@ async def api_organization_plan(req: OrganizationPlanRequest, session: dict = De
             api_key,
             session.get("model", "deepseek-v4-flash"),
             req.max_actions,
+            base_url=session.get("model_base_url", DEFAULT_MODEL_BASE_URL),
         )
     except Exception as exc:
         print(f"[organization_plan] failed: {exc}")
@@ -1090,7 +1175,7 @@ async def api_agent_search(req: SemanticSearchRequest, session: dict = Depends(g
             await rebuild_favorite_index(uid, cookies, folders=await get_folders(uid))
         response = await favorite_harness.chat(
             uid=uid, cookies=cookies, message=req.q, api_key=session.get("deepseek_key", ""),
-            model=session.get("model", "deepseek-v4-flash"),
+            model=session.get("model", "deepseek-v4-flash"), base_url=session.get("model_base_url", DEFAULT_MODEL_BASE_URL),
         )
         return {
             "answer": response["answer_markdown"],
@@ -1112,6 +1197,12 @@ async def auth_logout(request: Request):
     resp = JSONResponse({"success": True})
     resp.delete_cookie("session_id", path="/")
     return resp
+
+
+_FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
+if os.path.isfile(os.path.join(_FRONTEND_DIST, "index.html")):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")
 
 
 if __name__ == "__main__":

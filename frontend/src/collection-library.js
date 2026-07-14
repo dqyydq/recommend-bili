@@ -88,7 +88,11 @@ function renderVideos(items, title) {
     ${item.cover ? `<img src="${escapeAttr(getFavoriteCover(item.folder_id, item.id))}" alt="" loading="lazy" data-cover-fallback />` : `<div class="video-cover-placeholder"></div>`}
     <div><a href="${escapeAttr(item.link || `https://www.bilibili.com/video/${item.bvid || ""}`)}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a><p>${escapeHtml(item.intro || "暂无简介")}</p><span>${escapeHtml(item.upper || "未知 UP 主")} · ${escapeHtml(item.folder_name || item.source_folder || "收藏夹")}</span></div>
   </article>`).join("") || `<p class="empty-state">这里暂时没有收藏内容。</p>`;
-  document.querySelectorAll("[data-cover-fallback]").forEach(image => image.addEventListener("error", () => {
+  document.querySelectorAll("[data-cover-fallback]").forEach(installCoverFallback);
+}
+
+export function installCoverFallback(image) {
+  image.addEventListener("error", () => {
     image.replaceWith(Object.assign(document.createElement("div"), { className: "video-cover-placeholder" }));
-  }, { once: true }));
+  }, { once: true });
 }

@@ -4,10 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from openai import AsyncOpenAI
-
 from agents import (
-    DEEPSEEK_BASE_URL,
     _get_chroma_collection,
     build_knowledge_dashboard,
     build_organization_plan,
@@ -29,6 +26,7 @@ from database import (
 from embedding import get_embeddings
 from folder_structure_agent import build_folder_structure_plan
 from memory_service import present_memory
+from model_provider import create_model_provider
 
 
 RECENT_MESSAGES = 8
@@ -98,7 +96,7 @@ def deterministic_intent(message: str) -> str:
 
 
 class Planner:
-    async def plan(self, message: str, api_key: str, model: str) -> str:
+    async def plan(self, message: str, api_key: str, model: str, base_url: str | None = None) -> str:
         fallback = deterministic_intent(message)
         if not api_key:
             return fallback
@@ -108,11 +106,8 @@ class Planner:
             f"用户：{message}"
         )
         try:
-            client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
-            response = await client.chat.completions.create(
-                model=model, messages=[{"role": "user", "content": prompt}], max_tokens=20, temperature=0,
-            )
-            intent = (response.choices[0].message.content or "").strip()
+            provider = create_model_provider(api_key, model, base_url)
+            intent = await provider.complete([{"role": "user", "content": prompt}], max_tokens=20, temperature=0)
             return intent if intent in {"retrieve", "draft_structure", "inspect_cleanup", "analyze_topics", "inspect_health", "learning"} else fallback
         except Exception:
             return fallback
@@ -215,7 +210,7 @@ def _citation(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def answer_from_evidence(message: str, context: dict[str, Any], citations: list[dict[str, Any]], api_key: str, model: str) -> str:
+async def answer_from_evidence(message: str, context: dict[str, Any], citations: list[dict[str, Any]], api_key: str, model: str, base_url: str | None = None) -> str:
     if not citations:
         return "我没有在当前收藏快照里找到足够相关的证据。可以换一个更具体的主题、UP 主或使用场景。"
     evidence = "\n".join(f"[{index + 1}] {item['title']} | {item['upper']} | {item['folder_name']} | {item['link']}" for index, item in enumerate(citations))
@@ -223,11 +218,8 @@ async def answer_from_evidence(message: str, context: dict[str, Any], citations:
     if api_key:
         prompt = f"""你是个人视频知识助手。只根据证据回答，不得编造视频。使用 Markdown，引用必须写成 [1] 这样的编号。用户当前问题优先于画像；画像仅用于排序和措辞。结尾给一个明确下一步。\n\n用户问题：{message}\n相关记忆：\n{memory_lines or '无'}\n证据：\n{evidence}"""
         try:
-            client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
-            response = await client.chat.completions.create(
-                model=model, messages=[{"role": "user", "content": prompt}], max_tokens=800, temperature=0.35,
-            )
-            answer = (response.choices[0].message.content or "").strip()
+            provider = create_model_provider(api_key, model, base_url)
+            answer = await provider.complete([{"role": "user", "content": prompt}], max_tokens=800, temperature=0.35)
             if answer:
                 return answer
         except Exception as exc:
@@ -261,7 +253,7 @@ class FavoriteHarness:
 
     async def chat(
         self, uid: str, cookies: dict[str, str], message: str, api_key: str, model: str,
-        session_id: str | None = None, project_id: str | None = None,
+        session_id: str | None = None, project_id: str | None = None, base_url: str | None = None,
     ) -> dict[str, Any]:
         session = await get_agent_session(uid, session_id) if session_id else None
         if session_id and session is None:
@@ -270,7 +262,7 @@ class FavoriteHarness:
             session = await create_agent_session(uid, project_id=project_id, title=message[:80])
         session_id = session["id"]
         await append_agent_message(session_id, "user", message)
-        intent = await self.planner.plan(message, api_key, model)
+        intent = await self.planner.plan(message, api_key, model, base_url)
         run = await self.run_log.start(uid, session_id, intent)
         tools: list[dict[str, Any]] = []
         citations: list[dict[str, Any]] = []
@@ -312,7 +304,7 @@ class FavoriteHarness:
                 candidates = await hybrid_retrieve(uid, cookies, message, context["memories"])
                 citations = [_citation(item) for item in candidates[:CITATION_LIMIT]]
                 tools.append(self.tool_call("retrieve_favorites", candidate_count=len(candidates)))
-                answer = await answer_from_evidence(message, context, citations, api_key, model)
+                answer = await answer_from_evidence(message, context, citations, api_key, model, base_url)
             await append_agent_message(session_id, "assistant", answer, {"citations": citations, "suggested_actions": suggested_actions})
             memory_ids = [memory["id"] for memory in context["memories"]]
             await self.run_log.finish(run["id"], "completed", tools, citations, memory_ids)

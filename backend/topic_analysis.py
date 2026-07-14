@@ -63,10 +63,11 @@ async def run_topic_analysis(
     items: list[dict[str, Any]],
     api_key: str,
     model: str,
+    base_url: str | None = None,
 ) -> None:
     try:
         await set_topic_analysis_status(analysis_id, "running", "正在生成向量并聚合主题")
-        result = await classify_favorites(items, api_key, model=model)
+        result = await classify_favorites(items, api_key, model=model, base_url=base_url)
         clusters = enrich_topic_clusters(result.get("categories", []))
         await save_topic_analysis_result(analysis_id, clusters)
     except Exception as exc:

@@ -2,13 +2,12 @@ import asyncio
 import os
 
 import numpy as np
-from openai import AsyncOpenAI
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
 from embedding import get_embeddings
+from model_provider import ModelProvider, create_model_provider
 
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 LLM_NAMING_CONCURRENCY = int(os.getenv("LLM_NAMING_CONCURRENCY", "4"))
 
 
@@ -56,23 +55,19 @@ async def name_cluster(
     titles: list[str],
     api_key: str,
     model: str = "deepseek-v4-flash",
-    client: AsyncOpenAI | None = None,
+    provider: ModelProvider | None = None,
+    base_url: str | None = None,
 ) -> str:
-    llm_client = client or AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+    llm_provider = provider or create_model_provider(api_key, model, base_url)
     prompt = (
         "请根据以下视频标题，给这个分类起一个简洁的中文名字（不超过10个字）：\n"
         + "\n".join(f"- {t}" for t in titles)
         + "\n\n只需要返回分类名字，不要任何解释。"
     )
-    resp = await llm_client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=20,
-    )
-    return resp.choices[0].message.content.strip()
+    return (await llm_provider.complete([{"role": "user", "content": prompt}], max_tokens=20)).strip()
 
 
-async def classify_favorites(items: list[dict], api_key: str, model: str = "deepseek-v4-flash") -> dict:
+async def classify_favorites(items: list[dict], api_key: str, model: str = "deepseek-v4-flash", base_url: str | None = None) -> dict:
     if not items:
         return {"categories": [], "total": 0}
 
@@ -88,12 +83,15 @@ async def classify_favorites(items: list[dict], api_key: str, model: str = "deep
         clusters.setdefault(label, []).append(item)
 
     naming_semaphore = asyncio.Semaphore(LLM_NAMING_CONCURRENCY)
-    llm_client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+    llm_provider = create_model_provider(api_key, model, base_url) if api_key else None
 
     async def build_category(cluster_items_list: list[dict]) -> dict:
         titles = [item["title"] for item in cluster_items_list]
-        async with naming_semaphore:
-            name = await name_cluster(titles, api_key, model=model, client=llm_client)
+        if llm_provider:
+            async with naming_semaphore:
+                name = await name_cluster(titles, api_key, model=model, provider=llm_provider, base_url=base_url)
+        else:
+            name = (titles[0][:10] if titles else "未命名主题") or "未命名主题"
         return {
             "name": name,
             "items": cluster_items_list,

@@ -374,6 +374,21 @@ CREATE INDEX IF NOT EXISTS favorite_feedback_uid_item_idx ON favorite_feedback(u
 
 ALTER TABLE learning_projects ADD COLUMN IF NOT EXISTS context JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE learning_projects ADD COLUMN IF NOT EXISTS source_session_id TEXT REFERENCES agent_sessions(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS proactive_suggestions (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('daily', 'weekly_review', 'cleanup', 'interest_change')),
+    period_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'dismissed')) DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (uid, kind, period_key)
+);
+CREATE INDEX IF NOT EXISTS proactive_suggestions_uid_status_idx ON proactive_suggestions(uid, status, created_at DESC);
 """
 
 
@@ -1497,4 +1512,55 @@ async def get_feedback_for_items(uid: str, items: list[tuple[int, int]]) -> dict
     for row in rows:
         key = (int(row["folder_id"]), int(row["media_id"]))
         result.setdefault(key, {})[str(row["feedback"])] = int(row["count"])
+    return result
+
+
+async def list_proactive_suggestions(uid: str, status: str = "pending", limit: int = 20) -> list[dict[str, Any]]:
+    async with pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, kind, period_key, title, body, payload, status, created_at, updated_at FROM proactive_suggestions "
+            "WHERE uid = $1 AND status = $2 ORDER BY created_at DESC LIMIT $3",
+            uid, status, limit,
+        )
+    return [{**dict(row), "payload": _json_value(row["payload"])} for row in rows]
+
+
+async def update_proactive_suggestion(uid: str, suggestion_id: str, status: str) -> dict[str, Any] | None:
+    if status not in {"accepted", "dismissed"}:
+        raise ValueError("invalid suggestion status")
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE proactive_suggestions SET status = $3, updated_at = NOW() WHERE uid = $1 AND id = $2 AND status = 'pending' RETURNING *",
+            uid, suggestion_id, status,
+        )
+    return {**dict(row), "payload": _json_value(row["payload"])} if row else None
+
+
+async def clear_user_memories(uid: str) -> int:
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            count = await conn.fetchval("SELECT COUNT(*) FROM user_memories WHERE uid = $1", uid)
+            await conn.execute("DELETE FROM user_memories WHERE uid = $1", uid)
+            await conn.execute("UPDATE agent_runs SET memories_used = '[]'::jsonb WHERE uid = $1", uid)
+            await conn.execute("UPDATE agent_sessions SET summary = '' WHERE uid = $1", uid)
+    return int(count or 0)
+
+
+async def export_user_data(uid: str) -> dict[str, Any]:
+    tables = {
+        "user": ("SELECT * FROM users WHERE uid = $1",),
+        "folders": ("SELECT * FROM favorite_folders WHERE uid = $1 ORDER BY folder_id",),
+        "favorites": ("SELECT * FROM favorites WHERE uid = $1 ORDER BY folder_id, media_id",),
+        "memories": ("SELECT * FROM user_memories WHERE uid = $1 ORDER BY created_at",),
+        "sessions": ("SELECT * FROM agent_sessions WHERE uid = $1 ORDER BY created_at",),
+        "runs": ("SELECT * FROM agent_runs WHERE uid = $1 ORDER BY started_at",),
+        "projects": ("SELECT * FROM learning_projects WHERE uid = $1 ORDER BY created_at",),
+        "feedback": ("SELECT * FROM favorite_feedback WHERE uid = $1 ORDER BY created_at",),
+        "operations": ("SELECT * FROM operation_logs WHERE uid = $1 ORDER BY created_at",),
+    }
+    result: dict[str, Any] = {}
+    async with pool().acquire() as conn:
+        for name, (query,) in tables.items():
+            rows = await conn.fetch(query, uid)
+            result[name] = [dict(row) for row in rows]
     return result

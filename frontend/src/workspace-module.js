@@ -4,8 +4,10 @@ import {
   getFolderStructurePlans,
   getKnowledgeDashboard,
   getLearningProjects,
+  getAgentSuggestions,
   getOrganizationPlans,
   saveFavoriteFeedback,
+  updateAgentSuggestion,
 } from "./api.js";
 import { escapeAttr, escapeHtml, formatError, setButtonBusy, showInlineMessage, showToast } from "./ui.js";
 import { renderSafeMarkdown } from "./markdown.js";
@@ -142,8 +144,8 @@ async function loadWorkspace(container, navigate) {
   const progress = container.querySelector("#projectProgress");
   const pending = container.querySelector("#pendingReviews");
   try {
-    const [dashboard, projectsData, structuresData, organizationsData] = await Promise.all([
-      getKnowledgeDashboard(), getLearningProjects(), getFolderStructurePlans(), getOrganizationPlans(),
+    const [dashboard, projectsData, structuresData, organizationsData, suggestionsData] = await Promise.all([
+      getKnowledgeDashboard(), getLearningProjects(), getFolderStructurePlans(), getOrganizationPlans(), getAgentSuggestions(),
     ]);
     const projects = projectsData.projects || [];
     const structures = structuresData.plans || [];
@@ -165,7 +167,15 @@ async function loadWorkspace(container, navigate) {
       <div><strong>${Number(dashboard.folders_count || 0)}</strong><span>收藏夹</span></div>
       <div><strong>${Number(dashboard.indexed || 0)}</strong><span>语义索引</span></div>
       <div><strong>${Number(dashboard.health_score || 0)}</strong><span>健康度</span></div>`;
-    today.innerHTML = `<ol class="action-list">${(dashboard.today_actions || []).slice(0, 3).map(item => `<li>${escapeHtml(item)}</li>`).join("") || `<li>完成一次同步，让 Agent 读取最新收藏。</li>`}</ol>`;
+    const suggestions = suggestionsData.suggestions || [];
+    today.innerHTML = suggestions.length
+      ? `<div class="proactive-list">${suggestions.slice(0, 4).map(item => `<div class="proactive-item"><button data-suggestion-open="${escapeAttr(item.kind)}" type="button"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.body || "")}</span></button><button class="icon-button" data-suggestion-dismiss="${escapeAttr(item.id)}" type="button" title="忽略建议" aria-label="忽略建议">×</button></div>`).join("")}</div>`
+      : `<ol class="action-list">${(dashboard.today_actions || []).slice(0, 3).map(item => `<li>${escapeHtml(item)}</li>`).join("") || `<li>完成一次同步，让 Agent 读取最新收藏。</li>`}</ol>`;
+    today.querySelectorAll("[data-suggestion-open]").forEach(button => button.addEventListener("click", () => navigate(button.dataset.suggestionOpen === "cleanup" ? "operations" : button.dataset.suggestionOpen === "interest_change" ? "profile" : "learning")));
+    today.querySelectorAll("[data-suggestion-dismiss]").forEach(button => button.addEventListener("click", async () => {
+      await updateAgentSuggestion(button.dataset.suggestionDismiss, "dismissed");
+      button.closest(".proactive-item")?.remove();
+    }));
     progress.innerHTML = activeProject
       ? `<button class="context-link" data-project-open type="button"><strong>${escapeHtml(activeProject.goal)}</strong><span>第 ${Number(activeProject.current_week || 1)} 周 · ${Number(activeProject.weekly_minutes || 0)} 分钟/周</span></button>`
       : `<p class="empty-state">还没有持续学习项目。</p>`;

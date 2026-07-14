@@ -68,19 +68,19 @@ def _load_user_settings(uid: str) -> dict:
     """返回 {api_key, model}，文件不存在返回默认值"""
     path = _settings_path(uid)
     if not persistence_enabled() or not path:
-        return {"api_key": "", "model": "deepseek-v4-flash"}
+        return {"api_key": "", "model": "deepseek-v4-flash", "base_url": "https://api.deepseek.com"}
     try:
-        return load_encrypted_json(path) or {"api_key": "", "model": "deepseek-v4-flash"}
+        return load_encrypted_json(path) or {"api_key": "", "model": "deepseek-v4-flash", "base_url": "https://api.deepseek.com"}
     except Exception:
-        return {"api_key": "", "model": "deepseek-v4-flash"}
+        return {"api_key": "", "model": "deepseek-v4-flash", "base_url": "https://api.deepseek.com"}
 
 
-def _save_user_settings(uid: str, api_key: str, model: str):
+def _save_user_settings(uid: str, api_key: str, model: str, base_url: str = "https://api.deepseek.com"):
     path = _settings_path(uid)
     if not persistence_enabled() or not path:
         return
     try:
-        save_encrypted_json(path, {"api_key": api_key, "model": model})
+        save_encrypted_json(path, {"api_key": api_key, "model": model, "base_url": base_url})
     except Exception as e:
         print(f"[auth] 保存 settings 失败: {e}")
 
@@ -176,6 +176,7 @@ async def poll_qrcode(key: str) -> dict:
                 "bili_cookies": bili_cookies,
                 "deepseek_key": settings["api_key"],
                 "model": settings.get("model", "deepseek-v4-flash"),
+                "model_base_url": settings.get("base_url", "https://api.deepseek.com"),
                 "uid": uid,
                 "nickname": user_info.get("nickname", ""),
                 "avatar": user_info.get("avatar", ""),
@@ -216,4 +217,4 @@ def on_session_updated(session: dict):
     _save_sessions()
     uid = session.get("uid", "")
     if uid:
-        _save_user_settings(uid, session.get("deepseek_key", ""), session.get("model", "deepseek-v4-flash"))
+        _save_user_settings(uid, session.get("deepseek_key", ""), session.get("model", "deepseek-v4-flash"), session.get("model_base_url", "https://api.deepseek.com"))

@@ -4,11 +4,9 @@ import re
 import time
 from collections import Counter
 
-from openai import AsyncOpenAI
-
-from classifier import DEEPSEEK_BASE_URL
 from database import create_organization_plan, get_favorites, get_folders
-from embedding import embedding_collection_suffix, get_embeddings
+from embedding import EMBEDDING_MODEL, EMBEDDING_PROVIDER, embedding_collection_suffix, get_embeddings
+from model_provider import create_model_provider
 
 CHROMA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "chroma"))
 PROFILE_SAMPLE_SIZE = 80
@@ -158,6 +156,7 @@ async def build_organization_plan(
     api_key: str,
     model: str,
     max_actions: int = 12,
+    base_url: str | None = None,
 ) -> dict:
     items = await get_favorites(uid)
     if not items:
@@ -189,14 +188,8 @@ async def build_organization_plan(
     summary = "我先挑出重复收藏和长期未处理内容，供你逐项确认。"
     if api_key:
         try:
-            client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=500,
-                temperature=0.2,
-            )
-            payload = _json_from_text(response.choices[0].message.content or "")
+            provider = create_model_provider(api_key, model, base_url)
+            payload = _json_from_text(await provider.complete([{"role": "user", "content": prompt}], max_tokens=500, temperature=0.2))
             selected_ids = payload.get("selected_ids", []) if isinstance(payload.get("selected_ids"), list) else []
             if isinstance(payload.get("summary"), str) and payload["summary"].strip():
                 summary = payload["summary"].strip()[:160]
@@ -302,6 +295,7 @@ async def analyze_favorite_profile(
     api_key: str,
     model: str,
     folders: list[dict] | None = None,
+    base_url: str | None = None,
 ) -> dict:
     items, folders = await fetch_session_items(uid, cookies, folders)
     if not items:
@@ -343,14 +337,8 @@ async def analyze_favorite_profile(
 """.strip()
 
     try:
-        client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=900,
-            temperature=0.8,
-        )
-        profile = _json_from_text(resp.choices[0].message.content or "")
+        provider = create_model_provider(api_key, model, base_url)
+        profile = _json_from_text(await provider.complete([{"role": "user", "content": prompt}], max_tokens=900, temperature=0.8))
     except Exception as e:
         print(f"[profile_agent] LLM failed, using fallback: {e}")
         profile = {}
@@ -374,7 +362,13 @@ def _get_chroma_collection(uid: str):
     client = chromadb.PersistentClient(path=CHROMA_DIR)
     return client.get_or_create_collection(
         name=_safe_collection_name(uid),
-        metadata={"hnsw:space": "cosine"},
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_provider": EMBEDDING_PROVIDER,
+            "embedding_model": EMBEDDING_MODEL,
+            "embedding_suffix": embedding_collection_suffix(),
+            "schema_version": "2",
+        },
     )
 
 
@@ -432,6 +426,7 @@ async def semantic_search_favorites(
     folders: list[dict] | None = None,
     top_k: int = 8,
     refresh: bool = False,
+    base_url: str | None = None,
 ) -> dict:
     if not query.strip():
         return {"error": "请输入检索问题"}
@@ -491,14 +486,8 @@ async def semantic_search_favorites(
 """.strip()
 
     try:
-        client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=650,
-            temperature=0.55,
-        )
-        answer = (resp.choices[0].message.content or "").strip()
+        provider = create_model_provider(api_key, model, base_url)
+        answer = await provider.complete([{"role": "user", "content": prompt}], max_tokens=650, temperature=0.55)
     except Exception as e:
         print(f"[retrieval_agent] LLM failed: {e}")
         answer = "我先帮你找到了这些最相关的收藏，LLM 总结暂时失败，但结果列表可以直接打开查看。"
@@ -537,6 +526,7 @@ async def build_learning_path(
     model: str,
     folders: list[dict] | None = None,
     refresh: bool = False,
+    base_url: str | None = None,
 ) -> dict:
     search = await semantic_search_favorites(
         uid,
@@ -547,6 +537,7 @@ async def build_learning_path(
         folders=folders,
         top_k=12,
         refresh=refresh,
+        base_url=base_url,
     )
     if search.get("error"):
         return search
@@ -584,14 +575,8 @@ JSON schema:
 """.strip()
 
     try:
-        client = AsyncOpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1200,
-            temperature=0.45,
-        )
-        path = _json_from_text(resp.choices[0].message.content or "")
+        provider = create_model_provider(api_key, model, base_url)
+        path = _json_from_text(await provider.complete([{"role": "user", "content": prompt}], max_tokens=1200, temperature=0.45))
     except Exception as e:
         print(f"[learning_agent] LLM failed, using fallback: {e}")
         path = {}

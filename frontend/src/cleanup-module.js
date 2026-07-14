@@ -13,6 +13,10 @@ const VERDICT = {
   available: "当前可用",
 };
 
+export function isDefaultCleanupSelection(item) {
+  return item.verdict === "confirmed_invalid" && item.execution_state === "pending";
+}
+
 export async function renderCleanupModule(container) {
   container.innerHTML = `
     <div class="destination-head compact"><div><span class="eyebrow">安全清理</span><h2>失效收藏扫描</h2><p>只会默认选择 B站明确返回不存在的视频，删除前还会再次验证。</p></div><button id="startCleanupScan" class="btn" type="button">开始扫描</button></div>
@@ -70,7 +74,7 @@ function renderScan(scan, result) {
     <div class="cleanup-items">${items.map(item => renderItem(item)).join("") || `<p class="empty-state">扫描没有返回条目。</p>`}</div>`;
   const execute = result.querySelector("#executeCleanup");
   if (!execute) return;
-  execute.disabled = !items.some(item => item.selected_by_default && item.execution_state === "pending");
+  execute.disabled = !items.some(item => item.selected_by_default && isDefaultCleanupSelection(item));
   execute.addEventListener("click", async () => {
     const selected = [...result.querySelectorAll("[data-cleanup-item]:checked")].map(input => ({
       folder_id: Number(input.dataset.folderId), media_id: Number(input.dataset.mediaId),
@@ -94,7 +98,7 @@ function countCell(label, value, tone) {
 function renderItem(item) {
   const pending = item.execution_state === "pending";
   return `<label class="cleanup-item verdict-${escapeAttr(item.verdict)}">
-    <input data-cleanup-item data-folder-id="${Number(item.folder_id)}" data-media-id="${Number(item.media_id)}" type="checkbox" ${item.selected_by_default && pending ? "checked" : ""} ${item.verdict !== "confirmed_invalid" || !pending ? "disabled" : ""}>
+    <input data-cleanup-item data-folder-id="${Number(item.folder_id)}" data-media-id="${Number(item.media_id)}" type="checkbox" ${item.selected_by_default && isDefaultCleanupSelection(item) ? "checked" : ""} ${!isDefaultCleanupSelection(item) ? "disabled" : ""}>
     <span><strong>${escapeHtml(item.title || item.bvid || "未命名收藏")}</strong><small>${escapeHtml(VERDICT[item.verdict] || item.verdict)} · ${escapeHtml(item.reason || "")}</small>${!pending ? `<small>执行结果：${escapeHtml(item.execution_message || item.execution_state)}</small>` : ""}</span>
   </label>`;
 }

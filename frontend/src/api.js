@@ -51,10 +51,10 @@ export function getSettings() {
   return request("/settings");
 }
 
-export function setModel(model) {
+export function setModel(model, baseUrl = null) {
   return request("/settings/model", {
     method: "POST",
-    body: JSON.stringify({ model }),
+    body: JSON.stringify({ model, base_url: baseUrl }),
   });
 }
 
@@ -65,6 +65,13 @@ export function getFolders() {
 export function getFavorites(folderId) {
   return request(`/favorites?folder_id=${folderId}`);
 }
+
+export function getHealth() { return request("/health"); }
+export function startDemoSession() { return request("/demo/session", { method: "POST" }); }
+export function getAgentSuggestions() { return request("/agents/suggestions"); }
+export function updateAgentSuggestion(id, status) { return request(`/agents/suggestions/${encodeURIComponent(id)}`, { method: "POST", body: JSON.stringify({ status }) }); }
+export function clearAgentMemories(confirmation) { return request("/agents/memories/clear", { method: "POST", body: JSON.stringify({ confirmation }) }); }
+export function exportUserData() { return request("/data/export"); }
 
 export function getFavoriteCover(folderId, mediaId) {
   return `${BASE}/favorites/${encodeURIComponent(folderId)}/${encodeURIComponent(mediaId)}/cover`;

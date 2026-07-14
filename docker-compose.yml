@@ -17,5 +17,27 @@ services:
       timeout: 5s
       retries: 12
 
+  app:
+    profiles: ["full"]
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-bookmark}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-bookmark_agent}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      CORS_ORIGINS: http://localhost:${PORT:-8000},http://127.0.0.1:${PORT:-8000}
+      DEMO_MODE: ${DEMO_MODE:-false}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-https://api.deepseek.com}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-fastembed}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - favorite-agent-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   bookmark-postgres-data:
+  favorite-agent-data:

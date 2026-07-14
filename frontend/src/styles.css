@@ -1147,6 +1147,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .agent-processing span { width: 8px; height: 8px; border-radius: 50%; background: var(--info); animation: workspacePulse 1s ease-in-out infinite alternate; }
 .agent-suggested-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .run-reference { display: block; margin-top: 12px; color: var(--muted); }
+.proactive-list { display: grid; }
+.proactive-item { display: grid; grid-template-columns: minmax(0, 1fr) 30px; gap: 6px; align-items: start; border-bottom: 1px solid var(--line); }
+.proactive-item > button:first-child { border: 0; background: transparent; padding: 11px 0; text-align: left; cursor: pointer; }
+.proactive-item strong, .proactive-item span { display: block; }
+.proactive-item strong { font-size: 12px; }
+.proactive-item span { margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.45; }
 @keyframes workspacePulse { to { opacity: 0.3; } }
 .agent-response-head h3 { margin: 5px 0 7px; font-size: 17px; }
 .agent-response-head p { margin: 0 0 12px; color: #4d5864; font-size: 14px; line-height: 1.65; }
@@ -1279,6 +1285,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .memory-type { color: var(--info); font-size: 11px; }
 .memory-controls { display: flex; gap: 8px; align-items: center; }
 .memory-controls .input { width: 100px; padding: 7px 8px; }
+.settings-data-actions { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+.danger-text { color: #a83b3b; }
 .operation-section { border-bottom: 1px solid var(--line); padding-bottom: 28px; }
 .operation-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 0; border-top: 1px solid var(--line); }
 .operation-row > div { min-width: 0; display: grid; gap: 5px; }
