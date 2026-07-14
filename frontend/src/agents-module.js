@@ -9,6 +9,7 @@ import {
   confirmLearningProjectReview,
   confirmLearningProjectWeek,
   createLearningProject,
+  archiveLearningProject,
   executeOrganizationPlan,
   getKnowledgeDashboard,
   getFolderStructurePlans,
@@ -384,12 +385,16 @@ function renderLearningProjectDetail(project, el, reload) {
   const week = Number(project.current_week || 1);
   const tasks = (project.tasks || []).filter(task => Number(task.week_number) === week);
   const review = (project.reviews || []).find(item => Number(item.week_number) === week && item.status === "draft");
-  el.innerHTML = `<div class="learning-project-head"><div><strong>${escapeHtml(project.goal)}</strong><p>第 ${week} 周 · ${Number(project.weekly_minutes)} 分钟预算</p></div><button id="projectPlanBtn" class="btn">生成本周草稿</button></div>
+  el.innerHTML = `<div class="learning-project-head"><div><strong>${escapeHtml(project.goal)}</strong><p>第 ${week} 周 · ${Number(project.weekly_minutes)} 分钟预算 · ${project.status === "archived" ? "已归档" : "进行中"}</p></div><div class="learning-project-head-actions">${project.status === "active" ? `<button id="archiveProjectBtn" class="btn btn-secondary">归档</button><button id="projectPlanBtn" class="btn">生成本周草稿</button>` : ""}</div></div>
     <div class="learning-task-list">${tasks.map(task => `<div class="learning-task"><strong>${escapeHtml(task.title)}</strong><p>${escapeHtml(task.rationale || "")}</p><small>${Number(task.estimated_minutes)} 分钟 · ${escapeHtml(task.state)}</small>${task.favorite_refs?.map(ref => `<a href="${escapeAttr(ref.link || "#")}" target="_blank" rel="noopener">${escapeHtml(ref.title || "相关收藏")}</a>`).join("") || ""}${task.state === "pending" || task.state === "blocked" ? `<div><button data-task="completed" data-task-id="${escapeAttr(task.id)}" class="btn">完成</button><button data-task="blocked" data-task-id="${escapeAttr(task.id)}" class="btn btn-secondary">卡住</button></div>` : ""}</div>`).join("") || "<p class=\"muted\">先生成本周任务草稿。</p>"}</div>
     ${tasks.some(t => t.state === "draft") ? `<div class="agent-plan-footer"><button id="confirmWeekBtn" class="btn">确认本周任务</button></div>` : ""}
     <div class="learning-chat"><div>${(project.messages || []).map(m => `<p class="chat-${escapeAttr(m.role)}">${escapeHtml(m.content)}</p>`).join("")}</div><div class="agent-toolbar"><input id="projectChatInput" class="input" placeholder="例如：我卡在依赖注入，下一步怎么做？" /><button id="projectChatBtn" class="btn">问 Agent</button></div></div>
     <div class="agent-plan-footer"><button id="reviewProjectBtn" class="btn btn-secondary">生成本周回顾</button>${review ? `<button id="confirmReviewBtn" class="btn">确认下周计划</button>` : ""}</div>${review ? `<div class="agent-answer"><strong>本周回顾</strong><p>${escapeHtml(review.summary)}</p></div>` : ""}`;
-  document.getElementById("projectPlanBtn").onclick = async e => { setButtonBusy(e.currentTarget, true, "生成中…"); renderLearningProjectDetail(await buildLearningProjectPlan(project.id), el, reload); };
+  if (document.getElementById("projectPlanBtn")) document.getElementById("projectPlanBtn").onclick = async e => { setButtonBusy(e.currentTarget, true, "生成中…"); renderLearningProjectDetail(await buildLearningProjectPlan(project.id), el, reload); };
+  document.getElementById("archiveProjectBtn")?.addEventListener("click", async () => {
+    if (!window.confirm("归档后，项目型兴趣不再影响全局推荐，但历史进度会保留。是否继续？")) return;
+    renderLearningProjectDetail(await archiveLearningProject(project.id), el, reload);
+  });
   document.getElementById("confirmWeekBtn")?.addEventListener("click", async () => renderLearningProjectDetail(await confirmLearningProjectWeek(project.id, week), el, reload));
   el.querySelectorAll("[data-task]").forEach(button => button.addEventListener("click", async () => {
     const note = button.dataset.task === "blocked" ? (window.prompt("哪里卡住了？这会帮助 Agent 在回顾时调整计划。") || "") : "";

@@ -371,6 +371,9 @@ CREATE TABLE IF NOT EXISTS favorite_feedback (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS favorite_feedback_uid_item_idx ON favorite_feedback(uid, folder_id, media_id, created_at DESC);
+
+ALTER TABLE learning_projects ADD COLUMN IF NOT EXISTS context JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE learning_projects ADD COLUMN IF NOT EXISTS source_session_id TEXT REFERENCES agent_sessions(id) ON DELETE SET NULL;
 """
 
 
@@ -848,12 +851,19 @@ def _json_value(value: Any) -> Any:
     return json.loads(value) if isinstance(value, str) else value
 
 
-async def create_learning_project(uid: str, goal: str, duration_weeks: int, weekly_minutes: int) -> dict[str, Any]:
+async def create_learning_project(
+    uid: str,
+    goal: str,
+    duration_weeks: int,
+    weekly_minutes: int,
+    context: dict[str, Any] | None = None,
+    source_session_id: str | None = None,
+) -> dict[str, Any]:
     project_id = secrets.token_urlsafe(12)
     async with pool().acquire() as conn:
         await conn.execute(
-            "INSERT INTO learning_projects (id, uid, goal, duration_weeks, weekly_minutes) VALUES ($1,$2,$3,$4,$5)",
-            project_id, uid, goal, duration_weeks, weekly_minutes,
+            "INSERT INTO learning_projects (id, uid, goal, duration_weeks, weekly_minutes, context, source_session_id) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)",
+            project_id, uid, goal, duration_weeks, weekly_minutes, json.dumps(context or {}, ensure_ascii=False), source_session_id,
         )
     return await get_learning_project(uid, project_id) or {}
 
@@ -861,10 +871,10 @@ async def create_learning_project(uid: str, goal: str, duration_weeks: int, week
 async def list_learning_projects(uid: str) -> list[dict[str, Any]]:
     async with pool().acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, goal, duration_weeks, weekly_minutes, status, current_week, summary, created_at, updated_at "
+            "SELECT id, goal, duration_weeks, weekly_minutes, status, current_week, summary, context, source_session_id, created_at, updated_at "
             "FROM learning_projects WHERE uid = $1 ORDER BY updated_at DESC", uid,
         )
-    return [dict(row) for row in rows]
+    return [{**dict(row), "context": _json_value(row["context"])} for row in rows]
 
 
 async def get_learning_project(uid: str, project_id: str) -> dict[str, Any] | None:
@@ -882,6 +892,7 @@ async def get_learning_project(uid: str, project_id: str) -> dict[str, Any] | No
             "ORDER BY created_at DESC LIMIT 16", project_id,
         )
     data = dict(project)
+    data["context"] = _json_value(data.get("context")) or {}
     data["tasks"] = [{**dict(row), "favorite_refs": _json_value(row["favorite_refs"])} for row in tasks]
     data["reviews"] = [{**dict(row), "proposed_tasks": _json_value(row["proposed_tasks"])} for row in reviews]
     data["messages"] = [dict(row) for row in reversed(messages)]
@@ -892,6 +903,23 @@ async def delete_learning_project(uid: str, project_id: str) -> bool:
     async with pool().acquire() as conn:
         result = await conn.execute("DELETE FROM learning_projects WHERE uid = $1 AND id = $2", uid, project_id)
     return result.endswith("1")
+
+
+async def archive_learning_project(uid: str, project_id: str) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            result = await conn.execute(
+                "UPDATE learning_projects SET status = 'archived', updated_at = NOW() WHERE uid = $1 AND id = $2 AND status = 'active'",
+                uid, project_id,
+            )
+            if not result.endswith("1"):
+                return None
+            await conn.execute(
+                "UPDATE user_memories SET interest_state = 'historical', valid_until = NOW(), updated_at = NOW() "
+                "WHERE uid = $1 AND project_id = $2 AND status = 'active'",
+                uid, project_id,
+            )
+    return await get_learning_project(uid, project_id)
 
 
 async def save_learning_draft_tasks(uid: str, project_id: str, week_number: int, tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -931,13 +959,27 @@ async def update_learning_task(uid: str, project_id: str, task_id: str, state: s
         async with conn.transaction():
             row = await conn.fetchrow(
                 "UPDATE learning_tasks task SET state = $4, user_note = $5, updated_at = NOW() FROM learning_projects project "
-                "WHERE task.project_id = project.id AND project.uid = $1 AND task.project_id = $2 AND task.id = $3 AND task.state <> 'draft' RETURNING task.id",
+                "WHERE task.project_id = project.id AND project.uid = $1 AND task.project_id = $2 AND task.id = $3 AND task.state <> 'draft' RETURNING task.id, task.favorite_refs",
                 uid, project_id, task_id, state, note[:1000],
             )
             if row is None:
                 return None
             await conn.execute("INSERT INTO learning_progress_events (id, project_id, task_id, state, note) VALUES ($1,$2,$3,$4,$5)",
                                secrets.token_urlsafe(12), project_id, task_id, state, note[:1000])
+            feedback = {"completed": "watched", "skipped": "ignored", "blocked": "later"}.get(state)
+            refs = _json_value(row["favorite_refs"]) or []
+            feedback_rows = []
+            if feedback:
+                for ref in refs:
+                    folder_id = int(ref.get("folder_id") or 0)
+                    media_id = int(ref.get("media_id") or ref.get("id") or 0)
+                    if folder_id and media_id:
+                        feedback_rows.append((secrets.token_urlsafe(12), uid, folder_id, media_id, feedback, project_id))
+            if feedback_rows:
+                await conn.executemany(
+                    "INSERT INTO favorite_feedback (id, uid, folder_id, media_id, feedback, project_id) VALUES ($1,$2,$3,$4,$5,$6)",
+                    feedback_rows,
+                )
             await conn.execute("UPDATE learning_projects SET updated_at = NOW() WHERE id = $1", project_id)
     return await get_learning_project(uid, project_id)
 

@@ -201,9 +201,10 @@ export function buildLearningPath(goal, options = {}) {
 
 export function getLearningProjects() { return request("/agents/learning-projects"); }
 export function getLearningProject(id) { return request(`/agents/learning-projects/${encodeURIComponent(id)}`); }
-export function createLearningProject(goal, durationWeeks, weeklyMinutes) {
-  return request("/agents/learning-projects", { method: "POST", body: JSON.stringify({ goal, duration_weeks: durationWeeks, weekly_minutes: weeklyMinutes }) });
+export function createLearningProject(goal, durationWeeks, weeklyMinutes, favoriteRefs = [], sourceSessionId = null) {
+  return request("/agents/learning-projects", { method: "POST", body: JSON.stringify({ goal, duration_weeks: durationWeeks, weekly_minutes: weeklyMinutes, favorite_refs: favoriteRefs, source_session_id: sourceSessionId }) });
 }
+export function archiveLearningProject(id) { return request(`/agents/learning-projects/${encodeURIComponent(id)}/archive`, { method: "POST" }); }
 export function buildLearningProjectPlan(id) { return request(`/agents/learning-projects/${encodeURIComponent(id)}/plan`, { method: "POST" }); }
 export function confirmLearningProjectWeek(id, week) { return request(`/agents/learning-projects/${encodeURIComponent(id)}/weeks/${week}/confirm`, { method: "POST" }); }
 export function updateLearningProjectTask(id, taskId, state, note = "") { return request(`/agents/learning-projects/${encodeURIComponent(id)}/tasks/${encodeURIComponent(taskId)}`, { method: "POST", body: JSON.stringify({ state, note }) }); }

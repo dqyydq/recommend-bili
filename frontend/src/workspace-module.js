@@ -1,11 +1,13 @@
 import {
   chatWithAgent,
+  createLearningProject,
   getFolderStructurePlans,
   getKnowledgeDashboard,
   getLearningProjects,
   getOrganizationPlans,
+  saveFavoriteFeedback,
 } from "./api.js";
-import { escapeAttr, escapeHtml, formatError, setButtonBusy, showInlineMessage } from "./ui.js";
+import { escapeAttr, escapeHtml, formatError, setButtonBusy, showInlineMessage, showToast } from "./ui.js";
 import { renderSafeMarkdown } from "./markdown.js";
 
 export function renderWorkspaceModule(container, { navigate }) {
@@ -97,11 +99,28 @@ export function renderWorkspaceModule(container, { navigate }) {
       const actions = data.suggested_actions || [];
       result.innerHTML = `
         <div class="agent-response-head"><span class="eyebrow">Agent 结论</span><div class="markdown-answer">${renderSafeMarkdown(data.answer_markdown || "任务已完成。")}</div></div>
-        ${items.length ? `<div class="evidence-list">${items.map(item => `<a href="${escapeAttr(item.link)}" target="_blank" rel="noopener"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.upper || "未知 UP 主")} · ${escapeHtml(item.folder_name || "收藏夹")} · 综合分 ${escapeHtml(item.score || "-")}</span></a>`).join("")}</div>` : ""}
+        ${items.length ? `<div class="evidence-list">${items.map(item => `<article class="evidence-item"><a href="${escapeAttr(item.link)}" target="_blank" rel="noopener"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.upper || "未知 UP 主")} · ${escapeHtml(item.folder_name || "收藏夹")} · 综合分 ${escapeHtml(item.score || "-")}</span></a><div class="evidence-feedback"><button data-feedback="useful" data-folder-id="${Number(item.folder_id)}" data-media-id="${Number(item.media_id)}" type="button">有用</button><button data-feedback="ignored" data-folder-id="${Number(item.folder_id)}" data-media-id="${Number(item.media_id)}" type="button">忽略</button><button data-feedback="watched" data-folder-id="${Number(item.folder_id)}" data-media-id="${Number(item.media_id)}" type="button">已看</button><button data-feedback="later" data-folder-id="${Number(item.folder_id)}" data-media-id="${Number(item.media_id)}" type="button">稍后</button></div></article>`).join("")}</div>` : ""}
         ${actions.length ? `<div class="agent-suggested-actions">${actions.map(action => `<button class="btn btn-secondary" type="button" data-result-go="${escapeAttr(action.destination || "workspace")}">${escapeHtml(action.label || "继续")}</button>`).join("")}</div>` : ""}
+        ${items.length ? `<div class="agent-suggested-actions"><button class="btn" data-create-project type="button">转为学习项目</button></div>` : ""}
         <small class="run-reference">本次运行 ${escapeHtml(data.run_id || "")} · 已使用 ${Number((data.memories_used || []).length)} 条相关记忆</small>`;
       input.value = "";
       result.querySelectorAll("[data-result-go]").forEach(button => button.addEventListener("click", event => navigate(event.currentTarget.dataset.resultGo)));
+      result.querySelectorAll("[data-feedback]").forEach(button => button.addEventListener("click", async () => {
+        try {
+          await saveFavoriteFeedback({ folder_id: Number(button.dataset.folderId), media_id: Number(button.dataset.mediaId), feedback: button.dataset.feedback, session_id: sessionId });
+          button.classList.add("is-selected");
+          button.parentElement.querySelectorAll("button").forEach(item => { if (item !== button) item.classList.remove("is-selected"); });
+        } catch (error) { showToast(formatError(error, "反馈保存失败"), "error"); }
+      }));
+      result.querySelector("[data-create-project]")?.addEventListener("click", async event => {
+        const goal = window.prompt("学习项目目标", command) || "";
+        if (!goal.trim()) return;
+        try {
+          setButtonBusy(event.currentTarget, true, "创建中…");
+          await createLearningProject(goal.trim(), 4, 180, items, sessionId);
+          navigate("learning");
+        } catch (error) { showToast(formatError(error, "学习项目创建失败"), "error"); setButtonBusy(event.currentTarget, false); }
+      });
     } catch (error) {
       showInlineMessage(result, formatError(error, "Agent 暂时无法完成这个任务"));
     } finally {

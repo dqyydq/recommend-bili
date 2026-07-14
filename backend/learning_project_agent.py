@@ -12,7 +12,7 @@ def _fallback_tasks(results: list[dict[str, Any]], weekly_minutes: int) -> list[
     return [{
         "title": item.get("title", "学习收藏"),
         "rationale": "从与你目标最相关的收藏开始，完成后记录一个可复用结论。",
-        "favorite_refs": [{key: item.get(key, "") for key in ("bvid", "title", "link", "upper", "folder_name")}],
+        "favorite_refs": [{key: item.get(key, "") for key in ("folder_id", "media_id", "id", "bvid", "title", "link", "upper", "folder_name")}],
         "estimated_minutes": minutes,
     } for item in results[:count]]
 
@@ -25,7 +25,7 @@ def _allowed_tasks(raw_tasks: Any, results: list[dict[str, Any]], weekly_minutes
         for bvid in raw.get("bvids", []) if isinstance(raw, dict) else []:
             item = allowed.get(str(bvid))
             if item:
-                refs.append({key: item.get(key, "") for key in ("bvid", "title", "link", "upper", "folder_name")})
+                refs.append({key: item.get(key, "") for key in ("folder_id", "media_id", "id", "bvid", "title", "link", "upper", "folder_name")})
         if refs and isinstance(raw, dict) and str(raw.get("title") or "").strip():
             tasks.append({
                 "title": str(raw["title"]).strip()[:160],
@@ -38,13 +38,37 @@ def _allowed_tasks(raw_tasks: Any, results: list[dict[str, Any]], weekly_minutes
     return tasks or _fallback_tasks(results, weekly_minutes)
 
 
+def build_review_summary(week: int, tasks: list[dict[str, Any]]) -> tuple[float, str, int]:
+    completed = sum(task.get("state") == "completed" for task in tasks)
+    skipped = sum(task.get("state") == "skipped" for task in tasks)
+    blocked_tasks = [task for task in tasks if task.get("state") == "blocked"]
+    rate = round(completed / len(tasks), 2) if tasks else 0.0
+    summary = f"第 {week} 周完成 {completed}/{len(tasks)} 项，跳过 {skipped} 项，阻塞 {len(blocked_tasks)} 项。"
+    blockers = "；".join(task.get("user_note") or task.get("title", "") for task in blocked_tasks[:3])
+    if blockers:
+        summary += f" 主要阻塞：{blockers}。"
+    return rate, summary, len(blocked_tasks)
+
+
+def adjust_proposed_tasks(tasks: list[dict[str, Any]], blocked_count: int) -> list[dict[str, Any]]:
+    if not blocked_count:
+        return tasks
+    adjusted = [dict(task) for task in tasks[:max(1, len(tasks) - 1)]]
+    for task in adjusted:
+        task["estimated_minutes"] = max(15, int(task["estimated_minutes"] * 0.75))
+        task["rationale"] = "上周存在阻塞，本周缩小任务范围并优先完成可验证的小产出。"
+    return adjusted
+
+
 async def build_project_week(uid: str, project_id: str, cookies: dict, api_key: str, model: str, week_number: int | None = None) -> dict[str, Any] | None:
     project = await get_learning_project(uid, project_id)
     if project is None:
         return None
     week = week_number or int(project["current_week"])
+    saved_refs = list((project.get("context") or {}).get("favorite_refs") or [])
     search = await semantic_search_favorites(uid, cookies, project["goal"], api_key, model, top_k=10)
-    results = search.get("results", [])
+    seen = {str(item.get("bvid") or "") for item in saved_refs}
+    results = saved_refs + [item for item in search.get("results", []) if str(item.get("bvid") or "") not in seen]
     tasks = _fallback_tasks(results, int(project["weekly_minutes"]))
     if results:
         prompt = (
@@ -95,9 +119,8 @@ async def build_project_review(uid: str, project_id: str, cookies: dict, api_key
         return None
     week = int(project["current_week"])
     tasks = [task for task in project.get("tasks", []) if task.get("week_number") == week and task.get("state") != "draft"]
-    completed = sum(task["state"] == "completed" for task in tasks)
-    rate = round(completed / len(tasks), 2) if tasks else 0.0
-    summary = f"第 {week} 周完成 {completed}/{len(tasks)} 项任务。"
+    rate, summary, blocked_count = build_review_summary(week, tasks)
     next_search = await semantic_search_favorites(uid, cookies, project["goal"], api_key, model, top_k=8)
     proposed = _fallback_tasks(next_search.get("results", []), int(project["weekly_minutes"]))
+    proposed = adjust_proposed_tasks(proposed, blocked_count)
     return await save_weekly_review(uid, project_id, week, rate, summary, proposed)

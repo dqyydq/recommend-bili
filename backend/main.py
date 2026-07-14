@@ -37,6 +37,7 @@ from database import (
     update_cleanup_scan,
     create_user_memory, delete_user_memory, get_agent_session, get_user_memory, list_agent_sessions,
     list_user_memories, save_favorite_feedback, update_user_memory,
+    archive_learning_project,
 )
 from folder_structure_agent import build_folder_structure_plan
 from learning_project_agent import build_project_review, build_project_week, chat_with_project
@@ -158,6 +159,8 @@ class LearningProjectRequest(BaseModel):
     goal: str = Field(min_length=1, max_length=500)
     duration_weeks: int = Field(default=4, ge=1, le=52)
     weekly_minutes: int = Field(default=180, ge=15, le=10080)
+    favorite_refs: list[dict] = Field(default_factory=list, max_length=20)
+    source_session_id: str | None = Field(default=None, max_length=100)
 
 
 class LearningTaskUpdateRequest(BaseModel):
@@ -782,8 +785,16 @@ async def api_delete_agent_memory(memory_id: str, session: dict = Depends(get_se
 
 @app.post("/api/agents/feedback", dependencies=[Depends(require_trusted_origin)])
 async def api_agent_feedback(req: FavoriteFeedbackRequest, session: dict = Depends(get_session)):
+    uid = session.get("uid", "")
+    favorites = await get_favorites(uid, req.folder_id)
+    if not any(int(item.get("id") or 0) == req.media_id for item in favorites):
+        raise HTTPException(status_code=404, detail="收藏条目不存在")
+    if req.session_id and await get_agent_session(uid, req.session_id) is None:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    if req.project_id and await get_learning_project(uid, req.project_id) is None:
+        raise HTTPException(status_code=404, detail="学习项目不存在")
     feedback = await save_favorite_feedback(
-        session.get("uid", ""), req.folder_id, req.media_id, req.feedback, req.session_id, req.project_id,
+        uid, req.folder_id, req.media_id, req.feedback, req.session_id, req.project_id,
     )
     return {"feedback": feedback}
 
@@ -845,8 +856,31 @@ async def api_learning_projects(session: dict = Depends(get_session)):
 
 @app.post("/api/agents/learning-projects", dependencies=[Depends(require_trusted_origin)])
 async def api_create_learning_project(req: LearningProjectRequest, session: dict = Depends(get_session)):
-    project = await create_learning_project(session.get("uid", ""), req.goal, req.duration_weeks, req.weekly_minutes)
+    uid = session.get("uid", "")
+    if req.source_session_id and await get_agent_session(uid, req.source_session_id) is None:
+        raise HTTPException(status_code=404, detail="来源对话不存在")
+    refs = []
+    for item in req.favorite_refs[:20]:
+        refs.append({key: item.get(key) for key in ("folder_id", "media_id", "bvid", "title", "upper", "folder_name", "link") if item.get(key) is not None})
+    project = await create_learning_project(
+        uid, req.goal, req.duration_weeks, req.weekly_minutes,
+        context={"favorite_refs": refs}, source_session_id=req.source_session_id,
+    )
+    await create_user_memory(
+        uid, "semantic", f"当前学习目标：{req.goal}", "project", 1.0,
+        interest_state="active", project_id=project.get("id"),
+        evidence=[{"evidence_type": "learning_project", "reference_id": project.get("id", ""), "excerpt": req.goal}],
+    )
     await record_operation(session.get("uid", ""), "create_learning_project", {"project_id": project.get("id", "")})
+    return project
+
+
+@app.post("/api/agents/learning-projects/{project_id}/archive", dependencies=[Depends(require_trusted_origin)])
+async def api_archive_learning_project(project_id: str, session: dict = Depends(get_session)):
+    project = await archive_learning_project(session.get("uid", ""), project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="学习项目不存在或已经归档")
+    await record_operation(session.get("uid", ""), "archive_learning_project", {"project_id": project_id})
     return project
 
 

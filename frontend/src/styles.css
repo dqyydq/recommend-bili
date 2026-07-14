@@ -1162,6 +1162,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .evidence-list a { display: grid; gap: 4px; padding: 11px 0; border-bottom: 1px solid #d6e0e7; color: var(--ink); text-decoration: none; }
 .evidence-list a:hover strong { color: var(--info); }
 .evidence-list span { color: var(--muted); font-size: 12px; }
+.evidence-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; border-bottom: 1px solid #d6e0e7; }
+.evidence-item > a { border-bottom: 0; }
+.evidence-feedback { display: flex; gap: 3px; }
+.evidence-feedback button { border: 0; background: transparent; color: var(--muted); padding: 5px 6px; font-size: 11px; cursor: pointer; }
+.evidence-feedback button:hover, .evidence-feedback button.is-selected { color: var(--info); background: #edf3f6; }
+.learning-project-head-actions { display: flex; gap: 8px; }
 
 .workspace-section { padding: 30px 0; border-bottom: 1px solid var(--line); }
 .work-list { display: grid; border-top: 1px solid var(--line); }
@@ -1331,6 +1337,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .memory-composer { grid-template-columns: 1fr; }
   .memory-row { grid-template-columns: 1fr; gap: 12px; }
   .memory-controls { justify-content: space-between; }
+  .evidence-item { grid-template-columns: 1fr; gap: 0; padding-bottom: 8px; }
+  .evidence-feedback { padding-bottom: 4px; }
   .folder-rail { border-right: 0; border-bottom: 1px solid var(--line); }
   .folder-list { display: flex; max-height: none; overflow-x: auto; }
   .folder-list button { flex: 0 0 auto; width: auto; }
