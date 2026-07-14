@@ -1145,6 +1145,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .command-result { margin-top: 14px; border-left: 3px solid var(--info); padding: 15px 18px; background: #f2f6f9; }
 .agent-processing { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 13px; }
 .agent-processing span { width: 8px; height: 8px; border-radius: 50%; background: var(--info); animation: workspacePulse 1s ease-in-out infinite alternate; }
+.agent-suggested-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.run-reference { display: block; margin-top: 12px; color: var(--muted); }
 @keyframes workspacePulse { to { opacity: 0.3; } }
 .agent-response-head h3 { margin: 5px 0 7px; font-size: 17px; }
 .agent-response-head p { margin: 0 0 12px; color: #4d5864; font-size: 14px; line-height: 1.65; }

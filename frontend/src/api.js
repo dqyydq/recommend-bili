@@ -163,6 +163,13 @@ export function saveFavoriteFeedback(payload) {
   return request("/agents/feedback", { method: "POST", body: JSON.stringify(payload) });
 }
 
+export function chatWithAgent(message, sessionId = null, projectId = null) {
+  return request("/agents/chat", {
+    method: "POST",
+    body: JSON.stringify({ message, session_id: sessionId, project_id: projectId }),
+  });
+}
+
 export function getKnowledgeDashboard() {
   return request("/agents/dashboard");
 }

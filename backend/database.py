@@ -1437,3 +1437,22 @@ async def get_feedback_summary(uid: str, folder_id: int, media_id: int) -> dict[
             uid, folder_id, media_id,
         )
     return {str(row["feedback"]): int(row["count"]) for row in rows}
+
+
+async def get_feedback_for_items(uid: str, items: list[tuple[int, int]]) -> dict[tuple[int, int], dict[str, int]]:
+    if not items:
+        return {}
+    folder_ids = [item[0] for item in items]
+    media_ids = [item[1] for item in items]
+    async with pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT folder_id, media_id, feedback, COUNT(*) AS count FROM favorite_feedback "
+            "WHERE uid = $1 AND (folder_id, media_id) IN (SELECT * FROM UNNEST($2::bigint[], $3::bigint[])) "
+            "GROUP BY folder_id, media_id, feedback",
+            uid, folder_ids, media_ids,
+        )
+    result: dict[tuple[int, int], dict[str, int]] = {}
+    for row in rows:
+        key = (int(row["folder_id"]), int(row["media_id"]))
+        result.setdefault(key, {})[str(row["feedback"])] = int(row["count"])
+    return result

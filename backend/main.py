@@ -18,7 +18,6 @@ from agents import (
     build_learning_path,
     build_organization_plan,
     rebuild_favorite_index,
-    semantic_search_favorites,
 )
 from auth import COOKIE_SECURE, delete_session, generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool, on_session_updated
 from bili import search_all, add_favorite, _client, normalize_cover_url
@@ -45,6 +44,7 @@ from organization_executor import execute_organization_plan
 from sync_service import start_sync
 from topic_analysis import run_topic_analysis, snapshot_version
 from memory_service import present_memory, validate_memory_state, validate_memory_update
+from harness import favorite_harness
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
 ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
@@ -215,6 +215,12 @@ class FavoriteFeedbackRequest(BaseModel):
     folder_id: int = Field(gt=0)
     media_id: int = Field(gt=0)
     feedback: str = Field(pattern="^(useful|ignored|watched|later)$")
+    session_id: str | None = Field(default=None, max_length=100)
+    project_id: str | None = Field(default=None, max_length=100)
+
+
+class HarnessChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
     session_id: str | None = Field(default=None, max_length=100)
     project_id: str | None = Field(default=None, max_length=100)
 
@@ -688,6 +694,17 @@ async def api_favorite_cover(folder_id: int, media_id: int, session: dict = Depe
 
 # ---------- Agent 能力 ----------
 
+@app.post("/api/agents/chat", dependencies=[Depends(require_trusted_origin)])
+async def api_agent_chat(req: HarnessChatRequest, session: dict = Depends(get_session)):
+    try:
+        return await favorite_harness.chat(
+            uid=session.get("uid", ""), cookies=session.get("bili_cookies", {}), message=req.message,
+            api_key=session.get("deepseek_key", ""), model=session.get("model", "deepseek-v4-flash"),
+            session_id=req.session_id, project_id=req.project_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
 @app.get("/api/agents/sessions")
 async def api_agent_sessions(session: dict = Depends(get_session)):
     return {"sessions": await list_agent_sessions(session.get("uid", ""))}
@@ -1030,27 +1047,23 @@ async def api_agent_search_index(session: dict = Depends(get_session)):
         return {"error": str(e)}
 
 
-@app.post("/api/agents/search")
+@app.post("/api/agents/search", dependencies=[Depends(require_trusted_origin)])
 async def api_agent_search(req: SemanticSearchRequest, session: dict = Depends(get_session)):
-    api_key = session.get("deepseek_key", "")
-    if not api_key:
-        return JSONResponse({"error": "请先绑定 DeepSeek API Key"}, status_code=400)
     try:
         cookies = session.get("bili_cookies", {})
         uid = session.get("uid", "")
-        folders = await get_folders(uid)
-        session["folders"] = folders
-        model = session.get("model", "deepseek-v4-flash")
-        return await semantic_search_favorites(
-            uid,
-            cookies,
-            req.q,
-            api_key,
-            model,
-            folders=folders,
-            top_k=req.top_k,
-            refresh=req.refresh,
+        if req.refresh:
+            await rebuild_favorite_index(uid, cookies, folders=await get_folders(uid))
+        response = await favorite_harness.chat(
+            uid=uid, cookies=cookies, message=req.q, api_key=session.get("deepseek_key", ""),
+            model=session.get("model", "deepseek-v4-flash"),
         )
+        return {
+            "answer": response["answer_markdown"],
+            "results": response["citations"][:req.top_k],
+            "session_id": response["session_id"],
+            "run_id": response["run_id"],
+        }
     except Exception as e:
         return {"error": str(e)}
 

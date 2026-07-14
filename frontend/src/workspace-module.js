@@ -1,10 +1,9 @@
 import {
-  buildFolderStructurePlan,
+  chatWithAgent,
   getFolderStructurePlans,
   getKnowledgeDashboard,
   getLearningProjects,
   getOrganizationPlans,
-  semanticSearch,
 } from "./api.js";
 import { escapeAttr, escapeHtml, formatError, setButtonBusy, showInlineMessage } from "./ui.js";
 import { renderSafeMarkdown } from "./markdown.js";
@@ -76,6 +75,7 @@ export function renderWorkspaceModule(container, { navigate }) {
   const input = document.getElementById("agentCommandInput");
   const result = document.getElementById("commandResult");
   const submit = document.getElementById("agentCommandBtn");
+  let sessionId = null;
 
   container.querySelectorAll("[data-command]").forEach(button => {
     button.addEventListener("click", () => {
@@ -91,37 +91,17 @@ export function renderWorkspaceModule(container, { navigate }) {
     try {
       setButtonBusy(submit, true, "分析中…");
       result.innerHTML = `<div class="agent-processing"><span></span>正在判断任务并调用合适的 Agent 工具</div>`;
-      if (/(结构|整理|分类|文件夹)/.test(command)) {
-        const plan = await buildFolderStructurePlan(command);
-        result.innerHTML = renderCommandAnswer(
-          "已生成一份收藏结构蓝图",
-          `Agent 根据本地收藏快照提出了 ${Number(plan.action_count || plan.actions?.length || 0)} 个结构节点。蓝图只进入草稿区，不会直接修改 B 站收藏夹。`,
-          "前往操作记录逐项审核",
-          "operations",
-        );
-      } else if (/(学习计划|学习项目|课程|路线)/.test(command)) {
-        result.innerHTML = renderCommandAnswer(
-          "这个目标更适合持续学习项目",
-          "学习项目会保存任务进度、对话上下文和每周回顾，比一次性答案更适合持续推进。",
-          "创建学习项目",
-          "learning",
-        );
-      } else if (/(积压|吃灰|健康|失效)/.test(command)) {
-        const data = await getKnowledgeDashboard();
-        result.innerHTML = renderCommandAnswer(
-          `当前收藏健康度为 ${Number(data.health_score || 0)} 分`,
-          `${Number(data.dust_count || 0)} 条收藏超过 60 天未处理，另有 ${Number(data.light_dust_count || 0)} 条进入轻度积压区。`,
-          "查看收藏库",
-          "library",
-        );
-      } else {
-        const data = await semanticSearch(command, { topK: 5 });
-        const items = (data.results || []).slice(0, 5);
-        result.innerHTML = `
-          <div class="agent-response-head"><span class="eyebrow">检索结论</span><div class="markdown-answer">${renderSafeMarkdown(data.answer || "找到了这些相关收藏。")}</div></div>
-          <div class="evidence-list">${items.map(item => `<a href="${escapeAttr(item.link)}" target="_blank" rel="noopener"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.upper || "未知 UP 主")} · ${escapeHtml(item.folder_name || "收藏夹")} · 相关度 ${escapeHtml(item.score || "-")}</span></a>`).join("") || `<p class="empty-state">暂时没有找到足够相关的收藏。</p>`}</div>`;
-      }
-      result.querySelector("[data-result-go]")?.addEventListener("click", event => navigate(event.currentTarget.dataset.resultGo));
+      const data = await chatWithAgent(command, sessionId);
+      sessionId = data.session_id;
+      const items = data.citations || [];
+      const actions = data.suggested_actions || [];
+      result.innerHTML = `
+        <div class="agent-response-head"><span class="eyebrow">Agent 结论</span><div class="markdown-answer">${renderSafeMarkdown(data.answer_markdown || "任务已完成。")}</div></div>
+        ${items.length ? `<div class="evidence-list">${items.map(item => `<a href="${escapeAttr(item.link)}" target="_blank" rel="noopener"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.upper || "未知 UP 主")} · ${escapeHtml(item.folder_name || "收藏夹")} · 综合分 ${escapeHtml(item.score || "-")}</span></a>`).join("")}</div>` : ""}
+        ${actions.length ? `<div class="agent-suggested-actions">${actions.map(action => `<button class="btn btn-secondary" type="button" data-result-go="${escapeAttr(action.destination || "workspace")}">${escapeHtml(action.label || "继续")}</button>`).join("")}</div>` : ""}
+        <small class="run-reference">本次运行 ${escapeHtml(data.run_id || "")} · 已使用 ${Number((data.memories_used || []).length)} 条相关记忆</small>`;
+      input.value = "";
+      result.querySelectorAll("[data-result-go]").forEach(button => button.addEventListener("click", event => navigate(event.currentTarget.dataset.resultGo)));
     } catch (error) {
       showInlineMessage(result, formatError(error, "Agent 暂时无法完成这个任务"));
     } finally {
