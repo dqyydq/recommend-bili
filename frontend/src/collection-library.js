@@ -1,4 +1,4 @@
-import { getFavorites, getFolders, searchFavorites } from "./api.js";
+import { getFavoriteCover, getFavorites, getFolders, searchFavorites } from "./api.js";
 import { escapeAttr, escapeHtml, formatError, setButtonBusy, showInlineMessage } from "./ui.js";
 import { renderClassifyModule } from "./classify-module.js";
 import { renderDustModule } from "./dust-module.js";
@@ -85,7 +85,10 @@ function renderVideos(items, title) {
   document.getElementById("libraryResultTitle").textContent = title;
   document.getElementById("libraryResultCount").textContent = `${items.length} 条`;
   document.getElementById("libraryResults").innerHTML = items.map(item => `<article class="video-row">
-    ${item.cover ? `<img src="${escapeAttr(item.cover)}" alt="" loading="lazy" />` : `<div class="video-cover-placeholder"></div>`}
+    ${item.cover ? `<img src="${escapeAttr(getFavoriteCover(item.folder_id, item.id))}" alt="" loading="lazy" data-cover-fallback />` : `<div class="video-cover-placeholder"></div>`}
     <div><a href="${escapeAttr(item.link || `https://www.bilibili.com/video/${item.bvid || ""}`)}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a><p>${escapeHtml(item.intro || "暂无简介")}</p><span>${escapeHtml(item.upper || "未知 UP 主")} · ${escapeHtml(item.folder_name || item.source_folder || "收藏夹")}</span></div>
   </article>`).join("") || `<p class="empty-state">这里暂时没有收藏内容。</p>`;
+  document.querySelectorAll("[data-cover-fallback]").forEach(image => image.addEventListener("error", () => {
+    image.replaceWith(Object.assign(document.createElement("div"), { className: "video-cover-placeholder" }));
+  }, { once: true }));
 }

@@ -7,6 +7,7 @@ import {
   semanticSearch,
 } from "./api.js";
 import { escapeAttr, escapeHtml, formatError, setButtonBusy, showInlineMessage } from "./ui.js";
+import { renderSafeMarkdown } from "./markdown.js";
 
 export function renderWorkspaceModule(container, { navigate }) {
   container.innerHTML = `
@@ -117,7 +118,7 @@ export function renderWorkspaceModule(container, { navigate }) {
         const data = await semanticSearch(command, { topK: 5 });
         const items = (data.results || []).slice(0, 5);
         result.innerHTML = `
-          <div class="agent-response-head"><span class="eyebrow">检索结论</span><p>${escapeHtml(data.answer || "找到了这些相关收藏。").replaceAll("\n", "<br>")}</p></div>
+          <div class="agent-response-head"><span class="eyebrow">检索结论</span><div class="markdown-answer">${renderSafeMarkdown(data.answer || "找到了这些相关收藏。")}</div></div>
           <div class="evidence-list">${items.map(item => `<a href="${escapeAttr(item.link)}" target="_blank" rel="noopener"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.upper || "未知 UP 主")} · ${escapeHtml(item.folder_name || "收藏夹")} · 相关度 ${escapeHtml(item.score || "-")}</span></a>`).join("") || `<p class="empty-state">暂时没有找到足够相关的收藏。</p>`}</div>`;
       }
       result.querySelector("[data-result-go]")?.addEventListener("click", event => navigate(event.currentTarget.dataset.resultGo));

@@ -12,6 +12,7 @@ import {
   executeOrganizationPlan,
   getKnowledgeDashboard,
   getFolderStructurePlans,
+  getFolderStructurePlan,
   getLearningProject,
   getLearningProjects,
   getOrganizationPlans,
@@ -24,6 +25,7 @@ import {
   reviewLearningProject,
 } from "./api.js";
 import { escapeAttr, escapeHtml, formatError, setButtonBusy, showInlineMessage, showToast } from "./ui.js";
+import { renderSafeMarkdown } from "./markdown.js";
 
 export function renderAgentsModule(container) {
   container.innerHTML = `
@@ -293,7 +295,7 @@ function renderSearchResult(data, el) {
   el.innerHTML = `
     <div class="agent-answer">
       <div class="agent-kicker">Retrieval Agent · Chroma</div>
-      <p>${escapeHtml(data.answer || "我找到了这些相关收藏。").replaceAll("\n", "<br>")}</p>
+      <div class="markdown-answer">${renderSafeMarkdown(data.answer || "我找到了这些相关收藏。")}</div>
       <small>当前索引：${Number(data.indexed || 0)} 条收藏</small>
     </div>
     <div class="agent-results">
@@ -423,7 +425,12 @@ export function renderFolderStructureAgent(el) {
   document.getElementById("structureHistoryBtn").addEventListener("click", async () => {
     try {
       const data = await getFolderStructurePlans();
-      result.innerHTML = `<div class="agent-plan-list">${(data.plans || []).map(plan => `<div class="agent-plan-card"><div><strong>${escapeHtml(plan.goal)}</strong><p>${Number(plan.action_count)} 个目标文件夹</p></div><span class="agent-plan-status">${escapeHtml(plan.status)}</span></div>`).join("") || "<p class=\"muted\">暂无结构蓝图</p>"}</div>`;
+      result.innerHTML = `<div class="agent-plan-list">${(data.plans || []).map(plan => `<button class="agent-plan-card" data-structure-plan-id="${escapeAttr(plan.id)}"><div><strong>${escapeHtml(plan.goal)}</strong><p>${Number(plan.action_count)} 个目标文件夹</p></div><span class="agent-plan-status">${escapeHtml(plan.status)}</span></button>`).join("") || "<p class=\"muted\">暂无结构蓝图</p>"}</div>`;
+      result.querySelectorAll("[data-structure-plan-id]").forEach(button => button.addEventListener("click", async () => {
+        try {
+          renderFolderStructurePlan(await getFolderStructurePlan(button.dataset.structurePlanId), result);
+        } catch (e) { showInlineMessage(result, formatError(e, "结构蓝图加载失败")); }
+      }));
     } catch (e) { showInlineMessage(result, formatError(e, "历史蓝图加载失败")); }
   });
 }

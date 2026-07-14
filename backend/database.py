@@ -337,6 +337,15 @@ async def get_favorites(uid: str, folder_id: int | None = None) -> list[dict[str
     return [dict(row) for row in rows]
 
 
+async def get_favorite_cover(uid: str, folder_id: int, media_id: int) -> str:
+    async with pool().acquire() as conn:
+        value = await conn.fetchval(
+            "SELECT cover FROM favorites WHERE uid = $1 AND folder_id = $2 AND media_id = $3 AND is_active = TRUE",
+            uid, folder_id, media_id,
+        )
+    return str(value or "")
+
+
 async def search_favorites(uid: str, query: str, limit: int = 100) -> list[dict[str, Any]]:
     pattern = f"%{query.strip()}%"
     async with pool().acquire() as conn:

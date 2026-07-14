@@ -397,9 +397,12 @@ async def rebuild_favorite_index(uid: str, cookies: dict, folders: list[dict] | 
     metadatas = [
         {
             "bvid": item.get("bvid", ""),
+            "folder_id": str(item.get("folder_id", "")),
+            "media_id": str(item.get("id", "")),
             "title": item.get("title", ""),
             "upper": item.get("upper", ""),
             "link": item.get("link", ""),
+            "cover": item.get("cover", ""),
             "folder_name": item.get("folder_name", ""),
             "fav_time": item.get("fav_time", 0),
         }
@@ -455,11 +458,14 @@ async def semantic_search_favorites(
     results = []
     for meta, distance in zip(metadatas, distances):
         results.append({
+            "folder_id": meta.get("folder_id", ""),
+            "media_id": meta.get("media_id", ""),
             "title": meta.get("title", ""),
             "upper": meta.get("upper", ""),
             "link": meta.get("link", ""),
             "folder_name": meta.get("folder_name", ""),
             "bvid": meta.get("bvid", ""),
+            "cover": meta.get("cover", ""),
             "score": round(1 - float(distance), 4),
             "reason": _keyword_reason(query, meta),
         })

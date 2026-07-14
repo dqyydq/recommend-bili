@@ -1148,6 +1148,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 @keyframes workspacePulse { to { opacity: 0.3; } }
 .agent-response-head h3 { margin: 5px 0 7px; font-size: 17px; }
 .agent-response-head p { margin: 0 0 12px; color: #4d5864; font-size: 14px; line-height: 1.65; }
+.markdown-answer { margin: 0 0 12px; color: #4d5864; font-size: 14px; line-height: 1.65; }
+.markdown-answer > :first-child { margin-top: 0; }
+.markdown-answer > :last-child { margin-bottom: 0; }
+.markdown-answer h1, .markdown-answer h2, .markdown-answer h3 { margin: 12px 0 6px; color: var(--ink); font-size: 15px; }
+.markdown-answer p, .markdown-answer ul, .markdown-answer ol, .markdown-answer blockquote { margin: 8px 0; }
+.markdown-answer ul, .markdown-answer ol { padding-left: 22px; }
+.markdown-answer a { color: var(--info); }
+.markdown-answer code { padding: 1px 4px; border-radius: 3px; background: #e7edf2; font-family: Consolas, monospace; font-size: 12px; }
 .evidence-list { display: grid; margin-top: 10px; border-top: 1px solid #d6e0e7; }
 .evidence-list a { display: grid; gap: 4px; padding: 11px 0; border-bottom: 1px solid #d6e0e7; color: var(--ink); text-decoration: none; }
 .evidence-list a:hover strong { color: var(--info); }

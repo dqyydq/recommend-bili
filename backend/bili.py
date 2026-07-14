@@ -20,6 +20,16 @@ BILI_HEADERS = {
 BUVID3 = "3787611E-2E66-0B20-D062-B6ACF0A5987B22749infoc"
 
 
+def normalize_cover_url(value: str) -> str:
+    """Keep only an absolute image URL that can safely be rendered or proxied."""
+    cover = (value or "").strip()
+    if cover.startswith("//"):
+        return "https:" + cover
+    if cover.startswith("http://"):
+        return "https://" + cover[len("http://"):]
+    return cover if cover.startswith("https://") else ""
+
+
 def _client(cookies: dict[str, str] | None = None, extra_headers: dict[str, str] | None = None) -> httpx.AsyncClient:
     """创建带 Cookie 的 AsyncClient"""
     jar = httpx.Cookies()
@@ -66,7 +76,7 @@ def _media_to_item(media: dict, folder_id: int) -> dict:
         "title": media.get("title", ""),
         "intro": media.get("intro", ""),
         "upper": (media.get("upper") or {}).get("name", ""),
-        "cover": media.get("cover", ""),
+        "cover": normalize_cover_url(str(media.get("cover", ""))),
         "link": f"https://www.bilibili.com/video/{media.get('bvid', '')}",
         "source_folder": str(folder_id),
         "fav_time": media.get("fav_time", 0),

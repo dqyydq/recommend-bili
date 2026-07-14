@@ -66,6 +66,10 @@ export function getFavorites(folderId) {
   return request(`/favorites?folder_id=${folderId}`);
 }
 
+export function getFavoriteCover(folderId, mediaId) {
+  return `${BASE}/favorites/${encodeURIComponent(folderId)}/${encodeURIComponent(mediaId)}/cover`;
+}
+
 export function searchFavorites(q) {
   return request(`/search/favorites?q=${encodeURIComponent(q)}`);
 }
@@ -167,6 +171,7 @@ export function buildFolderStructurePlan(goal) {
   return request("/agents/folder-structure-plans", { method: "POST", body: JSON.stringify({ goal }) });
 }
 export function getFolderStructurePlans() { return request("/agents/folder-structure-plans"); }
+export function getFolderStructurePlan(id) { return request(`/agents/folder-structure-plans/${encodeURIComponent(id)}`); }
 export function updateFolderStructureAction(planId, actionId, state) {
   return request(`/agents/folder-structure-plans/${encodeURIComponent(planId)}/actions/${encodeURIComponent(actionId)}`, { method: "POST", body: JSON.stringify({ state }) });
 }

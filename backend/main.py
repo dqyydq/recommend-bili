@@ -5,7 +5,7 @@ import time
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, Response
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -20,11 +20,11 @@ from agents import (
     semantic_search_favorites,
 )
 from auth import COOKIE_SECURE, delete_session, generate_qrcode, poll_qrcode, get_session, sessions, qrcode_pool, on_session_updated
-from bili import search_all, add_favorite, _client
+from bili import search_all, add_favorite, _client, normalize_cover_url
 from classifier import classify_favorites
 from clean import _check_bvid, scan_invalid
 from database import (
-    approve_organization_plan, close_db, get_favorites, get_folders, get_organization_plan,
+    approve_organization_plan, close_db, get_favorite_cover, get_favorites, get_folders, get_organization_plan,
     init_db, list_classifications, list_organization_plans, load_classification,
     mark_sync_required, record_operation, save_classification, search_favorites, set_plan_action_state,
     confirm_learning_week, confirm_weekly_review, create_learning_project, delete_learning_project,
@@ -503,6 +503,33 @@ async def api_favorites_add(req: AddFavoriteRequest, session: dict = Depends(get
         return result
     except Exception as e:
         return {"error": str(e)}
+
+
+_COVER_HOST_SUFFIXES = (".hdslb.com", ".bilibili.com")
+_MAX_COVER_BYTES = 5 * 1024 * 1024
+
+
+@app.get("/api/favorites/{folder_id}/{media_id}/cover")
+async def api_favorite_cover(folder_id: int, media_id: int, session: dict = Depends(get_session)):
+    """Proxy a stored Bilibili cover without accepting arbitrary remote URLs."""
+    from urllib.parse import urlparse
+
+    cover = normalize_cover_url(await get_favorite_cover(session.get("uid", ""), folder_id, media_id))
+    parsed = urlparse(cover)
+    if not cover or parsed.scheme != "https" or not parsed.hostname or not parsed.hostname.endswith(_COVER_HOST_SUFFIXES):
+        raise HTTPException(status_code=404, detail="封面不可用")
+    try:
+        async with _client(session.get("bili_cookies", {}), {"Referer": "https://www.bilibili.com/"}) as client:
+            remote = await client.get(cover, timeout=12)
+            remote.raise_for_status()
+            content_type = remote.headers.get("content-type", "")
+            if not content_type.startswith("image/") or len(remote.content) > _MAX_COVER_BYTES:
+                raise HTTPException(status_code=404, detail="封面不可用")
+            return Response(remote.content, media_type=content_type, headers={"Cache-Control": "private, max-age=3600"})
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=404, detail="封面不可用")
 
 
 # ---------- Agent 能力 ----------
