@@ -135,6 +135,34 @@ export function analyzeProfile() {
   return request("/agents/profile");
 }
 
+export function getAgentMemories(includeOutdated = true) {
+  return request(`/agents/memories?include_outdated=${includeOutdated ? "true" : "false"}`);
+}
+
+export function createAgentMemory(payload) {
+  return request("/agents/memories", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function updateAgentMemory(id, payload) {
+  return request(`/agents/memories/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) });
+}
+
+export function outdateAgentMemory(id) {
+  return request(`/agents/memories/${encodeURIComponent(id)}/outdate`, { method: "POST" });
+}
+
+export function restoreAgentMemory(id) {
+  return request(`/agents/memories/${encodeURIComponent(id)}/restore`, { method: "POST" });
+}
+
+export function deleteAgentMemory(id) {
+  return request(`/agents/memories/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function saveFavoriteFeedback(payload) {
+  return request("/agents/feedback", { method: "POST", body: JSON.stringify(payload) });
+}
+
 export function getKnowledgeDashboard() {
   return request("/agents/dashboard");
 }

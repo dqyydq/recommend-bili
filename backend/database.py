@@ -293,6 +293,84 @@ CREATE TABLE IF NOT EXISTS cleanup_scan_items (
     PRIMARY KEY (scan_id, folder_id, media_id)
 );
 CREATE INDEX IF NOT EXISTS cleanup_scan_items_scan_verdict_idx ON cleanup_scan_items(scan_id, verdict);
+
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+    project_id TEXT REFERENCES learning_projects(id) ON DELETE SET NULL,
+    title TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (status IN ('active', 'archived')) DEFAULT 'active',
+    summary TEXT NOT NULL DEFAULT '',
+    message_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS agent_sessions_uid_updated_idx ON agent_sessions(uid, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_messages (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'system')),
+    content TEXT NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS agent_messages_session_created_idx ON agent_messages(session_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+    intent TEXT NOT NULL DEFAULT '',
+    tool_calls JSONB NOT NULL DEFAULT '[]'::jsonb,
+    citations JSONB NOT NULL DEFAULT '[]'::jsonb,
+    memories_used JSONB NOT NULL DEFAULT '[]'::jsonb,
+    error_message TEXT NOT NULL DEFAULT '',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS agent_runs_session_started_idx ON agent_runs(session_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS user_memories (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+    memory_type TEXT NOT NULL CHECK (memory_type IN ('semantic', 'episodic', 'procedural')),
+    content TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('explicit', 'behavior', 'project', 'system')),
+    confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    interest_state TEXT NOT NULL CHECK (interest_state IN ('active', 'cooling', 'dormant', 'historical')) DEFAULT 'active',
+    status TEXT NOT NULL CHECK (status IN ('active', 'outdated')) DEFAULT 'active',
+    project_id TEXT REFERENCES learning_projects(id) ON DELETE SET NULL,
+    valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    valid_until TIMESTAMPTZ,
+    last_confirmed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS user_memories_uid_status_idx ON user_memories(uid, status, interest_state, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS memory_evidence (
+    id TEXT PRIMARY KEY,
+    memory_id TEXT NOT NULL REFERENCES user_memories(id) ON DELETE CASCADE,
+    evidence_type TEXT NOT NULL,
+    reference_id TEXT NOT NULL DEFAULT '',
+    excerpt TEXT NOT NULL DEFAULT '',
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS memory_evidence_memory_idx ON memory_evidence(memory_id, occurred_at DESC);
+
+CREATE TABLE IF NOT EXISTS favorite_feedback (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+    folder_id BIGINT NOT NULL,
+    media_id BIGINT NOT NULL,
+    feedback TEXT NOT NULL CHECK (feedback IN ('useful', 'ignored', 'watched', 'later')),
+    session_id TEXT REFERENCES agent_sessions(id) ON DELETE SET NULL,
+    project_id TEXT REFERENCES learning_projects(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS favorite_feedback_uid_item_idx ON favorite_feedback(uid, folder_id, media_id, created_at DESC);
 """
 
 
@@ -318,6 +396,10 @@ async def init_db() -> None:
         await conn.execute(
             "UPDATE cleanup_scans SET status = 'failed', finished_at = NOW(), error_message = 'server restarted during scan' "
             "WHERE status IN ('queued', 'running', 'executing')"
+        )
+        await conn.execute(
+            "UPDATE agent_runs SET status = 'failed', finished_at = NOW(), error_message = 'server restarted during run' "
+            "WHERE status = 'running'"
         )
 
 
@@ -1156,3 +1238,202 @@ async def set_cleanup_item_execution(scan_id: str, folder_id: int, media_id: int
             "WHERE scan_id = $1 AND folder_id = $2 AND media_id = $3",
             scan_id, folder_id, media_id, state, message[:500],
         )
+
+
+async def create_agent_session(uid: str, project_id: str | None = None, title: str = "") -> dict[str, Any]:
+    session_id = secrets.token_urlsafe(12)
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO agent_sessions (id, uid, project_id, title) VALUES ($1,$2,$3,$4) RETURNING *",
+            session_id, uid, project_id, title[:160],
+        )
+    return dict(row)
+
+
+async def get_agent_session(uid: str, session_id: str, message_limit: int = 50) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        session = await conn.fetchrow("SELECT * FROM agent_sessions WHERE uid = $1 AND id = $2", uid, session_id)
+        if session is None:
+            return None
+        messages = await conn.fetch(
+            "SELECT id, role, content, metadata, created_at FROM agent_messages WHERE session_id = $1 ORDER BY created_at DESC LIMIT $2",
+            session_id, message_limit,
+        )
+    data = dict(session)
+    data["messages"] = [
+        {**dict(row), "metadata": _json_value(row["metadata"])} for row in reversed(messages)
+    ]
+    return data
+
+
+async def list_agent_sessions(uid: str, limit: int = 30) -> list[dict[str, Any]]:
+    async with pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, project_id, title, status, summary, message_count, created_at, updated_at FROM agent_sessions "
+            "WHERE uid = $1 ORDER BY updated_at DESC LIMIT $2", uid, limit,
+        )
+    return [dict(row) for row in rows]
+
+
+async def append_agent_message(session_id: str, role: str, content: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    message_id = secrets.token_urlsafe(12)
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "INSERT INTO agent_messages (id, session_id, role, content, metadata) VALUES ($1,$2,$3,$4,$5::jsonb) RETURNING *",
+                message_id, session_id, role, content[:12000], json.dumps(metadata or {}, ensure_ascii=False),
+            )
+            await conn.execute(
+                "UPDATE agent_sessions SET message_count = message_count + 1, updated_at = NOW(), "
+                "title = CASE WHEN title = '' AND $2 = 'user' THEN LEFT($3, 80) ELSE title END WHERE id = $1",
+                session_id, role, content,
+            )
+    return {**dict(row), "metadata": _json_value(row["metadata"])}
+
+
+async def update_agent_session_summary(uid: str, session_id: str, summary: str) -> bool:
+    async with pool().acquire() as conn:
+        result = await conn.execute(
+            "UPDATE agent_sessions SET summary = $3, updated_at = NOW() WHERE uid = $1 AND id = $2",
+            uid, session_id, summary[:4000],
+        )
+    return result.endswith("1")
+
+
+async def create_agent_run(uid: str, session_id: str, intent: str = "") -> dict[str, Any]:
+    run_id = secrets.token_urlsafe(12)
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO agent_runs (id, uid, session_id, status, intent) VALUES ($1,$2,$3,'running',$4) RETURNING *",
+            run_id, uid, session_id, intent[:100],
+        )
+    return dict(row)
+
+
+async def finish_agent_run(
+    run_id: str,
+    status: str,
+    tool_calls: list[dict[str, Any]] | None = None,
+    citations: list[dict[str, Any]] | None = None,
+    memories_used: list[str] | None = None,
+    error_message: str = "",
+) -> None:
+    async with pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_runs SET status = $2, tool_calls = $3::jsonb, citations = $4::jsonb, memories_used = $5::jsonb, "
+            "error_message = $6, finished_at = NOW() WHERE id = $1",
+            run_id, status, json.dumps(tool_calls or [], ensure_ascii=False), json.dumps(citations or [], ensure_ascii=False),
+            json.dumps(memories_used or [], ensure_ascii=False), error_message[:2000],
+        )
+
+
+async def create_user_memory(
+    uid: str,
+    memory_type: str,
+    content: str,
+    source_kind: str,
+    confidence: float,
+    interest_state: str = "active",
+    project_id: str | None = None,
+    evidence: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    memory_id = secrets.token_urlsafe(12)
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO user_memories (id, uid, memory_type, content, source_kind, confidence, interest_state, project_id, last_confirmed_at) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $5 = 'explicit' THEN NOW() ELSE NULL END)",
+                memory_id, uid, memory_type, content[:1000], source_kind, confidence, interest_state, project_id,
+            )
+            if evidence:
+                await conn.executemany(
+                    "INSERT INTO memory_evidence (id, memory_id, evidence_type, reference_id, excerpt, occurred_at) "
+                    "VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,NOW()))",
+                    [(secrets.token_urlsafe(12), memory_id, item.get("evidence_type", source_kind),
+                      str(item.get("reference_id") or ""), str(item.get("excerpt") or "")[:1000], item.get("occurred_at"))
+                     for item in evidence],
+                )
+    return await get_user_memory(uid, memory_id) or {}
+
+
+async def get_user_memory(uid: str, memory_id: str) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        memory = await conn.fetchrow("SELECT * FROM user_memories WHERE uid = $1 AND id = $2", uid, memory_id)
+        if memory is None:
+            return None
+        evidence = await conn.fetch(
+            "SELECT id, evidence_type, reference_id, excerpt, occurred_at FROM memory_evidence WHERE memory_id = $1 ORDER BY occurred_at DESC",
+            memory_id,
+        )
+    data = dict(memory)
+    data["evidence"] = [dict(row) for row in evidence]
+    return data
+
+
+async def list_user_memories(uid: str, include_outdated: bool = True, limit: int = 200) -> list[dict[str, Any]]:
+    query = "SELECT id FROM user_memories WHERE uid = $1"
+    if not include_outdated:
+        query += " AND status = 'active'"
+    query += " ORDER BY updated_at DESC LIMIT $2"
+    async with pool().acquire() as conn:
+        rows = await conn.fetch(query, uid, limit)
+    memories: list[dict[str, Any]] = []
+    for row in rows:
+        memory = await get_user_memory(uid, row["id"])
+        if memory:
+            memories.append(memory)
+    return memories
+
+
+async def update_user_memory(uid: str, memory_id: str, **fields: Any) -> dict[str, Any] | None:
+    allowed = {"content", "source_kind", "confidence", "interest_state", "status", "valid_until", "last_confirmed_at"}
+    values = {key: value for key, value in fields.items() if key in allowed}
+    if not values:
+        return await get_user_memory(uid, memory_id)
+    columns = list(values)
+    assignments = ", ".join(f"{column} = ${index}" for index, column in enumerate(columns, start=3))
+    async with pool().acquire() as conn:
+        result = await conn.execute(
+            f"UPDATE user_memories SET {assignments}, updated_at = NOW() WHERE uid = $1 AND id = $2",
+            uid, memory_id, *(values[column] for column in columns),
+        )
+    return await get_user_memory(uid, memory_id) if result.endswith("1") else None
+
+
+async def delete_user_memory(uid: str, memory_id: str) -> bool:
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            result = await conn.execute("DELETE FROM user_memories WHERE uid = $1 AND id = $2", uid, memory_id)
+            if result.endswith("1"):
+                await conn.execute(
+                    "UPDATE agent_runs SET memories_used = '[]'::jsonb WHERE uid = $2 AND memories_used ? $1",
+                    memory_id, uid,
+                )
+    return result.endswith("1")
+
+
+async def save_favorite_feedback(
+    uid: str,
+    folder_id: int,
+    media_id: int,
+    feedback: str,
+    session_id: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    feedback_id = secrets.token_urlsafe(12)
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO favorite_feedback (id, uid, folder_id, media_id, feedback, session_id, project_id) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+            feedback_id, uid, folder_id, media_id, feedback, session_id, project_id,
+        )
+    return dict(row)
+
+
+async def get_feedback_summary(uid: str, folder_id: int, media_id: int) -> dict[str, int]:
+    async with pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT feedback, COUNT(*) AS count FROM favorite_feedback WHERE uid = $1 AND folder_id = $2 AND media_id = $3 GROUP BY feedback",
+            uid, folder_id, media_id,
+        )
+    return {str(row["feedback"]): int(row["count"]) for row in rows}

@@ -1257,6 +1257,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .cleanup-item strong, .cleanup-item small { display: block; }
 .cleanup-item strong { font-size: 13px; }
 .cleanup-item small { color: var(--muted); margin-top: 3px; }
+.memory-composer { display: grid; grid-template-columns: minmax(0, 1fr) 180px auto; gap: 8px; padding: 16px 0 22px; border-bottom: 1px solid var(--line); }
+.memory-group { padding: 28px 0 4px; }
+.memory-group + .memory-group { border-top: 1px solid var(--line); }
+.memory-list { display: grid; }
+.memory-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; padding: 16px 0; border-top: 1px solid var(--line); }
+.memory-row.is-outdated { opacity: 0.58; }
+.memory-main { min-width: 0; }
+.memory-main strong, .memory-main small { display: block; }
+.memory-main strong { margin: 5px 0; font-size: 14px; }
+.memory-main p { margin: 4px 0; color: var(--muted); font-size: 13px; }
+.memory-main small { color: var(--muted); }
+.memory-type { color: var(--info); font-size: 11px; }
+.memory-controls { display: flex; gap: 8px; align-items: center; }
+.memory-controls .input { width: 100px; padding: 7px 8px; }
 .operation-section { border-bottom: 1px solid var(--line); padding-bottom: 28px; }
 .operation-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 0; border-top: 1px solid var(--line); }
 .operation-row > div { min-width: 0; display: grid; gap: 5px; }
@@ -1312,6 +1326,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .cleanup-counts { grid-template-columns: repeat(2, 1fr); }
   .cleanup-count:nth-child(2) { border-right: 0; }
   .cleanup-count:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+  .memory-composer { grid-template-columns: 1fr; }
+  .memory-row { grid-template-columns: 1fr; gap: 12px; }
+  .memory-controls { justify-content: space-between; }
   .folder-rail { border-right: 0; border-bottom: 1px solid var(--line); }
   .folder-list { display: flex; max-height: none; overflow-x: auto; }
   .folder-list button { flex: 0 0 auto; width: auto; }

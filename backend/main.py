@@ -36,12 +36,15 @@ from database import (
     claim_cleanup_scan_execution, create_cleanup_scan, create_topic_analysis, get_cleanup_scan,
     get_latest_cleanup_scan, get_latest_topic_analysis, get_topic_analysis, set_cleanup_item_execution,
     update_cleanup_scan,
+    create_user_memory, delete_user_memory, get_agent_session, get_user_memory, list_agent_sessions,
+    list_user_memories, save_favorite_feedback, update_user_memory,
 )
 from folder_structure_agent import build_folder_structure_plan
 from learning_project_agent import build_project_review, build_project_week, chat_with_project
 from organization_executor import execute_organization_plan
 from sync_service import start_sync
 from topic_analysis import run_topic_analysis, snapshot_version
+from memory_service import present_memory, validate_memory_state, validate_memory_update
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
 ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
@@ -190,6 +193,30 @@ class CleanupExecuteItem(BaseModel):
 
 class CleanupExecuteRequest(BaseModel):
     items: list[CleanupExecuteItem] = Field(min_length=1, max_length=100)
+
+
+class MemoryCreateRequest(BaseModel):
+    memory_type: str = Field(pattern="^(semantic|episodic|procedural)$")
+    content: str = Field(min_length=1, max_length=1000)
+    source_kind: str = Field(default="explicit", pattern="^(explicit|behavior|project|system)$")
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    interest_state: str = Field(default="active", pattern="^(active|cooling|dormant|historical)$")
+    project_id: str | None = Field(default=None, max_length=100)
+
+
+class MemoryUpdateRequest(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=1000)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    interest_state: str | None = Field(default=None, pattern="^(active|cooling|dormant|historical)$")
+    confirm_as_explicit: bool = False
+
+
+class FavoriteFeedbackRequest(BaseModel):
+    folder_id: int = Field(gt=0)
+    media_id: int = Field(gt=0)
+    feedback: str = Field(pattern="^(useful|ignored|watched|later)$")
+    session_id: str | None = Field(default=None, max_length=100)
+    project_id: str | None = Field(default=None, max_length=100)
 
 
 @app.get("/api/settings")
@@ -660,6 +687,88 @@ async def api_favorite_cover(folder_id: int, media_id: int, session: dict = Depe
 
 
 # ---------- Agent 能力 ----------
+
+@app.get("/api/agents/sessions")
+async def api_agent_sessions(session: dict = Depends(get_session)):
+    return {"sessions": await list_agent_sessions(session.get("uid", ""))}
+
+
+@app.get("/api/agents/sessions/{session_id}")
+async def api_agent_session(session_id: str, session: dict = Depends(get_session)):
+    data = await get_agent_session(session.get("uid", ""), session_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    return {"session": data}
+
+
+@app.get("/api/agents/memories")
+async def api_agent_memories(include_outdated: bool = True, session: dict = Depends(get_session)):
+    memories = await list_user_memories(session.get("uid", ""), include_outdated=include_outdated)
+    return {"memories": [present_memory(memory) for memory in memories]}
+
+
+@app.post("/api/agents/memories", dependencies=[Depends(require_trusted_origin)])
+async def api_create_agent_memory(req: MemoryCreateRequest, session: dict = Depends(get_session)):
+    try:
+        validate_memory_state(req.source_kind, req.interest_state)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    memory = await create_user_memory(
+        session.get("uid", ""), req.memory_type, req.content, req.source_kind, req.confidence,
+        interest_state=req.interest_state, project_id=req.project_id,
+        evidence=[{"evidence_type": "user_statement", "excerpt": req.content}] if req.source_kind == "explicit" else None,
+    )
+    return {"memory": present_memory(memory)}
+
+
+@app.patch("/api/agents/memories/{memory_id}", dependencies=[Depends(require_trusted_origin)])
+async def api_update_agent_memory(memory_id: str, req: MemoryUpdateRequest, session: dict = Depends(get_session)):
+    uid = session.get("uid", "")
+    memory = await get_user_memory(uid, memory_id)
+    if memory is None:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    changes = req.model_dump(exclude_unset=True, exclude={"confirm_as_explicit"})
+    if req.confirm_as_explicit:
+        changes["source_kind"] = "explicit"
+        changes["last_confirmed_at"] = datetime.now(timezone.utc)
+    candidate = {**memory, **changes}
+    try:
+        validate_memory_update(candidate, changes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    updated = await update_user_memory(uid, memory_id, **changes)
+    return {"memory": present_memory(updated or memory)}
+
+
+@app.post("/api/agents/memories/{memory_id}/outdate", dependencies=[Depends(require_trusted_origin)])
+async def api_outdate_agent_memory(memory_id: str, session: dict = Depends(get_session)):
+    memory = await update_user_memory(session.get("uid", ""), memory_id, status="outdated")
+    if memory is None:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    return {"memory": present_memory(memory)}
+
+
+@app.post("/api/agents/memories/{memory_id}/restore", dependencies=[Depends(require_trusted_origin)])
+async def api_restore_agent_memory(memory_id: str, session: dict = Depends(get_session)):
+    memory = await update_user_memory(session.get("uid", ""), memory_id, status="active")
+    if memory is None:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    return {"memory": present_memory(memory)}
+
+
+@app.delete("/api/agents/memories/{memory_id}", dependencies=[Depends(require_trusted_origin)])
+async def api_delete_agent_memory(memory_id: str, session: dict = Depends(get_session)):
+    if not await delete_user_memory(session.get("uid", ""), memory_id):
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    return {"deleted": True}
+
+
+@app.post("/api/agents/feedback", dependencies=[Depends(require_trusted_origin)])
+async def api_agent_feedback(req: FavoriteFeedbackRequest, session: dict = Depends(get_session)):
+    feedback = await save_favorite_feedback(
+        session.get("uid", ""), req.folder_id, req.media_id, req.feedback, req.session_id, req.project_id,
+    )
+    return {"feedback": feedback}
 
 @app.get("/api/agents/dashboard")
 async def api_agent_dashboard(session: dict = Depends(get_session)):

@@ -3,6 +3,7 @@ import { renderLearningProjectsAgent } from "./agents-module.js";
 import { renderCollectionLibrary } from "./collection-library.js";
 import { renderOperationsModule } from "./operations-module.js";
 import { renderWorkspaceModule } from "./workspace-module.js";
+import { renderProfileModule } from "./profile-module.js";
 import { escapeAttr, escapeHtml, setButtonBusy, showToast } from "./ui.js";
 
 export function renderConsole(app, user) {
@@ -16,6 +17,7 @@ export function renderConsole(app, user) {
           <button class="active" data-page="workspace" type="button">工作台</button>
           <button data-page="library" type="button">收藏库</button>
           <button data-page="learning" type="button">学习项目</button>
+          <button data-page="profile" type="button">我的画像</button>
           <button data-page="operations" type="button">操作记录</button>
         </nav>
         <div class="header-actions">
@@ -36,6 +38,7 @@ export function renderConsole(app, user) {
     workspace: () => renderWorkspaceModule(content, { navigate }),
     library: () => renderCollectionLibrary(content),
     learning: () => renderLearningProjectsAgent(content),
+    profile: () => renderProfileModule(content),
     operations: () => renderOperationsModule(content),
   };
 
