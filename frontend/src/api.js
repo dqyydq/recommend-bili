@@ -70,6 +70,41 @@ export function getFavoriteCover(folderId, mediaId) {
   return `${BASE}/favorites/${encodeURIComponent(folderId)}/${encodeURIComponent(mediaId)}/cover`;
 }
 
+export function createTopicAnalysis(folderId = null, force = false) {
+  return request("/topics/analyses", {
+    method: "POST",
+    body: JSON.stringify({ folder_id: folderId ? Number(folderId) : null, force }),
+  });
+}
+
+export function getTopicAnalysis(id) {
+  return request(`/topics/analyses/${encodeURIComponent(id)}`);
+}
+
+export function getLatestTopicAnalysis(folderId = null) {
+  const suffix = folderId ? `?folder_id=${encodeURIComponent(folderId)}` : "";
+  return request(`/topics/analyses/latest${suffix}`);
+}
+
+export function createCleanupScan(force = false) {
+  return request("/clean/scans", { method: "POST", body: JSON.stringify({ force }) });
+}
+
+export function getCleanupScan(id) {
+  return request(`/clean/scans/${encodeURIComponent(id)}`);
+}
+
+export function getLatestCleanupScan() {
+  return request("/clean/scans/latest");
+}
+
+export function executeCleanupScan(id, items) {
+  return request(`/clean/scans/${encodeURIComponent(id)}/execute`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
+}
+
 export function searchFavorites(q) {
   return request(`/search/favorites?q=${encodeURIComponent(q)}`);
 }

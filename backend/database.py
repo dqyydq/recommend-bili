@@ -215,6 +215,84 @@ CREATE TABLE IF NOT EXISTS folder_structure_actions (
     UNIQUE (plan_id, sequence)
 );
 CREATE INDEX IF NOT EXISTS folder_structure_actions_plan_idx ON folder_structure_actions(plan_id, sequence);
+
+CREATE TABLE IF NOT EXISTS topic_analyses (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+    folder_id BIGINT,
+    snapshot_version TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+    item_count INTEGER NOT NULL DEFAULT 0,
+    cluster_count INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS topic_analyses_uid_created_idx ON topic_analyses(uid, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS topic_analyses_snapshot_completed_idx
+    ON topic_analyses(uid, COALESCE(folder_id, 0), snapshot_version) WHERE status = 'completed';
+
+CREATE TABLE IF NOT EXISTS topic_clusters (
+    id TEXT PRIMARY KEY,
+    analysis_id TEXT NOT NULL REFERENCES topic_analyses(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    item_count INTEGER NOT NULL DEFAULT 0,
+    representative_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    upper_creators JSONB NOT NULL DEFAULT '[]'::jsonb,
+    time_trend JSONB NOT NULL DEFAULT '{}'::jsonb,
+    interest_state TEXT NOT NULL CHECK (interest_state IN ('active', 'cooling', 'dormant', 'historical')) DEFAULT 'historical',
+    UNIQUE (analysis_id, sequence)
+);
+
+CREATE TABLE IF NOT EXISTS topic_cluster_items (
+    cluster_id TEXT NOT NULL REFERENCES topic_clusters(id) ON DELETE CASCADE,
+    folder_id BIGINT NOT NULL,
+    media_id BIGINT NOT NULL,
+    bvid TEXT NOT NULL DEFAULT '',
+    score REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (cluster_id, folder_id, media_id)
+);
+
+CREATE TABLE IF NOT EXISTS cleanup_scans (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed', 'executing')),
+    total INTEGER NOT NULL DEFAULT 0,
+    checked INTEGER NOT NULL DEFAULT 0,
+    confirmed_invalid_count INTEGER NOT NULL DEFAULT 0,
+    review_required_count INTEGER NOT NULL DEFAULT 0,
+    unknown_count INTEGER NOT NULL DEFAULT 0,
+    available_count INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS cleanup_scans_uid_created_idx ON cleanup_scans(uid, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS one_running_cleanup_scan_per_user
+    ON cleanup_scans(uid) WHERE status IN ('queued', 'running', 'executing');
+
+CREATE TABLE IF NOT EXISTS cleanup_scan_items (
+    scan_id TEXT NOT NULL REFERENCES cleanup_scans(id) ON DELETE CASCADE,
+    folder_id BIGINT NOT NULL,
+    media_id BIGINT NOT NULL,
+    bvid TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    verdict TEXT NOT NULL CHECK (verdict IN ('confirmed_invalid', 'review_required', 'unknown', 'available')),
+    reason TEXT NOT NULL DEFAULT '',
+    selected_by_default BOOLEAN NOT NULL DEFAULT FALSE,
+    execution_state TEXT NOT NULL CHECK (execution_state IN ('pending', 'removed', 'skipped', 'failed')) DEFAULT 'pending',
+    execution_message TEXT NOT NULL DEFAULT '',
+    checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    executed_at TIMESTAMPTZ,
+    PRIMARY KEY (scan_id, folder_id, media_id)
+);
+CREATE INDEX IF NOT EXISTS cleanup_scan_items_scan_verdict_idx ON cleanup_scan_items(scan_id, verdict);
 """
 
 
@@ -232,6 +310,14 @@ async def init_db() -> None:
         await conn.execute(
             "UPDATE sync_jobs SET status = 'failed', finished_at = NOW(), error_message = 'server restarted during sync' "
             "WHERE status IN ('queued', 'running')"
+        )
+        await conn.execute(
+            "UPDATE topic_analyses SET status = 'failed', finished_at = NOW(), error_message = 'server restarted during analysis' "
+            "WHERE status IN ('queued', 'running')"
+        )
+        await conn.execute(
+            "UPDATE cleanup_scans SET status = 'failed', finished_at = NOW(), error_message = 'server restarted during scan' "
+            "WHERE status IN ('queued', 'running', 'executing')"
         )
 
 
@@ -886,3 +972,187 @@ async def finalize_folder_structure_plan(uid: str, plan_id: str) -> dict[str, An
             uid, plan_id,
         )
     return await get_folder_structure_plan(uid, plan_id) if result.endswith("1") else None
+
+
+async def create_topic_analysis(uid: str, folder_id: int | None, snapshot_version: str, item_count: int) -> tuple[dict[str, Any], bool]:
+    """Create a durable analysis job, or reuse a completed result for the same snapshot."""
+    async with pool().acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT * FROM topic_analyses WHERE uid = $1 AND COALESCE(folder_id, 0) = COALESCE($2, 0) "
+            "AND snapshot_version = $3 AND status = 'completed' ORDER BY created_at DESC LIMIT 1",
+            uid, folder_id, snapshot_version,
+        )
+        if existing:
+            return dict(existing), True
+        active = await conn.fetchrow(
+            "SELECT * FROM topic_analyses WHERE uid = $1 AND COALESCE(folder_id, 0) = COALESCE($2, 0) "
+            "AND snapshot_version = $3 AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1",
+            uid, folder_id, snapshot_version,
+        )
+        if active:
+            return dict(active), False
+        analysis_id = secrets.token_urlsafe(12)
+        row = await conn.fetchrow(
+            "INSERT INTO topic_analyses (id, uid, folder_id, snapshot_version, status, item_count, message) "
+            "VALUES ($1,$2,$3,$4,'queued',$5,'等待分析') RETURNING *",
+            analysis_id, uid, folder_id, snapshot_version, item_count,
+        )
+    return dict(row), False
+
+
+async def set_topic_analysis_status(analysis_id: str, status: str, message: str = "", error_message: str = "") -> None:
+    if status not in {"running", "completed", "failed"}:
+        raise ValueError("invalid topic analysis status")
+    async with pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE topic_analyses SET status = $2, message = $3, error_message = $4, "
+            "started_at = CASE WHEN $2 = 'running' THEN COALESCE(started_at, NOW()) ELSE started_at END, "
+            "finished_at = CASE WHEN $2 IN ('completed', 'failed') THEN NOW() ELSE finished_at END WHERE id = $1",
+            analysis_id, status, message[:500], error_message[:2000],
+        )
+
+
+async def save_topic_analysis_result(analysis_id: str, clusters: list[dict[str, Any]]) -> None:
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM topic_clusters WHERE analysis_id = $1", analysis_id)
+            for sequence, cluster in enumerate(clusters, start=1):
+                cluster_id = secrets.token_urlsafe(12)
+                await conn.execute(
+                    "INSERT INTO topic_clusters (id, analysis_id, sequence, name, summary, item_count, representative_items, upper_creators, time_trend, interest_state) "
+                    "VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10)",
+                    cluster_id, analysis_id, sequence, cluster["name"], cluster.get("summary", ""),
+                    len(cluster.get("items", [])), json.dumps(cluster.get("representative_items", []), ensure_ascii=False),
+                    json.dumps(cluster.get("upper_creators", []), ensure_ascii=False),
+                    json.dumps(cluster.get("time_trend", {}), ensure_ascii=False), cluster.get("interest_state", "historical"),
+                )
+                items = cluster.get("items", [])
+                if items:
+                    await conn.executemany(
+                        "INSERT INTO topic_cluster_items (cluster_id, folder_id, media_id, bvid, score) VALUES ($1,$2,$3,$4,$5)",
+                        [(cluster_id, int(item.get("folder_id") or 0), int(item.get("id") or item.get("media_id") or 0),
+                          str(item.get("bvid") or ""), float(item.get("topic_score") or 0)) for item in items],
+                    )
+            await conn.execute(
+                "UPDATE topic_analyses SET status = 'completed', cluster_count = $2, message = '分析完成', finished_at = NOW() WHERE id = $1",
+                analysis_id, len(clusters),
+            )
+
+
+async def get_topic_analysis(uid: str, analysis_id: str) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        analysis = await conn.fetchrow("SELECT * FROM topic_analyses WHERE uid = $1 AND id = $2", uid, analysis_id)
+        if analysis is None:
+            return None
+        clusters = await conn.fetch(
+            "SELECT id, sequence, name, summary, item_count, representative_items, upper_creators, time_trend, interest_state "
+            "FROM topic_clusters WHERE analysis_id = $1 ORDER BY sequence", analysis_id,
+        )
+    result = dict(analysis)
+    result["clusters"] = [
+        {**dict(row), "representative_items": _json_value(row["representative_items"]),
+         "upper_creators": _json_value(row["upper_creators"]), "time_trend": _json_value(row["time_trend"])}
+        for row in clusters
+    ]
+    return result
+
+
+async def get_latest_topic_analysis(uid: str, folder_id: int | None = None) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id FROM topic_analyses WHERE uid = $1 AND ($2::bigint IS NULL OR folder_id = $2) "
+            "ORDER BY created_at DESC LIMIT 1", uid, folder_id,
+        )
+    return await get_topic_analysis(uid, row["id"]) if row else None
+
+
+async def create_cleanup_scan(uid: str, total: int) -> tuple[dict[str, Any], bool]:
+    async with pool().acquire() as conn:
+        active = await conn.fetchrow(
+            "SELECT * FROM cleanup_scans WHERE uid = $1 AND status IN ('queued', 'running', 'executing') ORDER BY created_at DESC LIMIT 1", uid,
+        )
+        if active:
+            return dict(active), True
+        scan_id = secrets.token_urlsafe(12)
+        row = await conn.fetchrow(
+            "INSERT INTO cleanup_scans (id, uid, status, total, message) VALUES ($1,$2,'queued',$3,'等待扫描') RETURNING *",
+            scan_id, uid, total,
+        )
+    return dict(row), False
+
+
+async def update_cleanup_scan(scan_id: str, **fields: Any) -> None:
+    allowed = {
+        "status", "total", "checked", "confirmed_invalid_count", "review_required_count",
+        "unknown_count", "available_count", "message", "error_message", "started_at", "finished_at",
+    }
+    values = {key: value for key, value in fields.items() if key in allowed}
+    if not values:
+        return
+    columns = list(values)
+    assignments = ", ".join(f"{column} = ${index}" for index, column in enumerate(columns, start=2))
+    async with pool().acquire() as conn:
+        await conn.execute(f"UPDATE cleanup_scans SET {assignments} WHERE id = $1", scan_id, *(values[column] for column in columns))
+
+
+async def save_cleanup_scan_items(scan_id: str, items: list[dict[str, Any]]) -> None:
+    if not items:
+        return
+    async with pool().acquire() as conn:
+        await conn.executemany(
+            "INSERT INTO cleanup_scan_items (scan_id, folder_id, media_id, bvid, title, verdict, reason, selected_by_default) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (scan_id, folder_id, media_id) DO UPDATE SET "
+            "verdict = EXCLUDED.verdict, reason = EXCLUDED.reason, selected_by_default = EXCLUDED.selected_by_default, checked_at = NOW()",
+            [(scan_id, int(item.get("folder_id") or 0), int(item.get("id") or item.get("media_id") or 0),
+              str(item.get("bvid") or ""), str(item.get("title") or ""), item["verdict"], item.get("reason", ""),
+              item["verdict"] == "confirmed_invalid") for item in items],
+        )
+
+
+async def get_cleanup_scan(uid: str, scan_id: str) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        scan = await conn.fetchrow("SELECT * FROM cleanup_scans WHERE uid = $1 AND id = $2", uid, scan_id)
+        if scan is None:
+            return None
+        rows = await conn.fetch(
+            "SELECT folder_id, media_id, bvid, title, verdict, reason, selected_by_default, execution_state, execution_message, checked_at, executed_at "
+            "FROM cleanup_scan_items WHERE scan_id = $1 ORDER BY selected_by_default DESC, title", scan_id,
+        )
+    result = dict(scan)
+    result["items"] = [dict(row) for row in rows]
+    return result
+
+
+async def get_latest_cleanup_scan(uid: str) -> dict[str, Any] | None:
+    async with pool().acquire() as conn:
+        scan_id = await conn.fetchval("SELECT id FROM cleanup_scans WHERE uid = $1 ORDER BY created_at DESC LIMIT 1", uid)
+    return await get_cleanup_scan(uid, scan_id) if scan_id else None
+
+
+async def claim_cleanup_scan_execution(uid: str, scan_id: str, requested: list[tuple[int, int]]) -> list[dict[str, Any]] | None:
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            result = await conn.execute(
+                "UPDATE cleanup_scans SET status = 'executing', message = '正在复核并执行' WHERE uid = $1 AND id = $2 AND status = 'completed'",
+                uid, scan_id,
+            )
+            if not result.endswith("1"):
+                return None
+            rows = await conn.fetch(
+                "SELECT folder_id, media_id, bvid, title FROM cleanup_scan_items WHERE scan_id = $1 "
+                "AND verdict = 'confirmed_invalid' AND execution_state = 'pending'",
+                scan_id,
+            )
+    requested_set = set(requested)
+    return [dict(row) for row in rows if (int(row["folder_id"]), int(row["media_id"])) in requested_set]
+
+
+async def set_cleanup_item_execution(scan_id: str, folder_id: int, media_id: int, state: str, message: str) -> None:
+    if state not in {"removed", "skipped", "failed"}:
+        raise ValueError("invalid cleanup execution state")
+    async with pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE cleanup_scan_items SET execution_state = $4, execution_message = $5, executed_at = NOW() "
+            "WHERE scan_id = $1 AND folder_id = $2 AND media_id = $3",
+            scan_id, folder_id, media_id, state, message[:500],
+        )

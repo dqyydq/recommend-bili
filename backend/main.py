@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +24,7 @@ from auth import COOKIE_SECURE, delete_session, generate_qrcode, poll_qrcode, ge
 from bili import search_all, add_favorite, _client, normalize_cover_url
 from classifier import classify_favorites
 from clean import _check_bvid, scan_invalid
+from cleanup_service import run_cleanup_scan
 from database import (
     approve_organization_plan, close_db, get_favorite_cover, get_favorites, get_folders, get_organization_plan,
     init_db, list_classifications, list_organization_plans, load_classification,
@@ -31,11 +33,15 @@ from database import (
     get_learning_project, list_learning_projects, update_learning_task,
     finalize_folder_structure_plan, get_folder_structure_plan, list_folder_structure_plans,
     set_folder_structure_action_state,
+    claim_cleanup_scan_execution, create_cleanup_scan, create_topic_analysis, get_cleanup_scan,
+    get_latest_cleanup_scan, get_latest_topic_analysis, get_topic_analysis, set_cleanup_item_execution,
+    update_cleanup_scan,
 )
 from folder_structure_agent import build_folder_structure_plan
 from learning_project_agent import build_project_review, build_project_week, chat_with_project
 from organization_executor import execute_organization_plan
 from sync_service import start_sync
+from topic_analysis import run_topic_analysis, snapshot_version
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
 ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
@@ -168,6 +174,24 @@ class FolderStructureActionRequest(BaseModel):
     state: str = Field(pattern="^(approved|skipped)$")
 
 
+class TopicAnalysisRequest(BaseModel):
+    folder_id: int | None = Field(default=None, gt=0)
+    force: bool = False
+
+
+class CleanupScanRequest(BaseModel):
+    force: bool = False
+
+
+class CleanupExecuteItem(BaseModel):
+    folder_id: int = Field(gt=0)
+    media_id: int = Field(gt=0)
+
+
+class CleanupExecuteRequest(BaseModel):
+    items: list[CleanupExecuteItem] = Field(min_length=1, max_length=100)
+
+
 @app.get("/api/settings")
 async def api_settings(session: dict = Depends(get_session)):
     key = session.get("deepseek_key", "")
@@ -270,6 +294,38 @@ async def api_analyze(request: Request, folder_id: int | None = None, session: d
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+@app.post("/api/topics/analyses", dependencies=[Depends(require_trusted_origin)])
+async def api_create_topic_analysis(req: TopicAnalysisRequest, session: dict = Depends(get_session)):
+    uid = session.get("uid", "")
+    items = await get_favorites(uid, req.folder_id)
+    if not items:
+        raise HTTPException(status_code=409, detail="本地收藏快照为空，请先执行同步")
+    api_key = session.get("deepseek_key", "")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="请先配置模型 API Key")
+    version = snapshot_version(items)
+    if req.force:
+        version = f"{version}-{int(time.time())}"
+    analysis, cached = await create_topic_analysis(uid, req.folder_id, version, len(items))
+    if analysis["status"] == "queued":
+        asyncio.create_task(run_topic_analysis(analysis["id"], items, api_key, session.get("model", "deepseek-v4-flash")))
+    return {"analysis": analysis, "cached": cached}
+
+
+@app.get("/api/topics/analyses/latest")
+async def api_latest_topic_analysis(folder_id: int | None = None, session: dict = Depends(get_session)):
+    analysis = await get_latest_topic_analysis(session.get("uid", ""), folder_id)
+    return {"analysis": analysis}
+
+
+@app.get("/api/topics/analyses/{analysis_id}")
+async def api_topic_analysis(analysis_id: str, session: dict = Depends(get_session)):
+    analysis = await get_topic_analysis(session.get("uid", ""), analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="主题分析不存在")
+    return {"analysis": analysis}
 
 
 # ---------- 吃灰检测 ----------
@@ -389,6 +445,77 @@ class RemoveItem(BaseModel):
 
 class RemoveRequest(BaseModel):
     items: list[RemoveItem] = Field(min_length=1, max_length=100)
+
+
+@app.post("/api/clean/scans", dependencies=[Depends(require_trusted_origin)])
+async def api_create_cleanup_scan(req: CleanupScanRequest, session: dict = Depends(get_session)):
+    uid = session.get("uid", "")
+    items = await get_favorites(uid)
+    if not items:
+        raise HTTPException(status_code=409, detail="本地收藏快照为空，请先执行同步")
+    scan, reused = await create_cleanup_scan(uid, len(items))
+    if scan["status"] == "queued":
+        asyncio.create_task(run_cleanup_scan(scan["id"], session.get("bili_cookies", {}), items))
+    return {"scan": scan, "reused": reused}
+
+
+@app.get("/api/clean/scans/latest")
+async def api_latest_cleanup_scan(session: dict = Depends(get_session)):
+    return {"scan": await get_latest_cleanup_scan(session.get("uid", ""))}
+
+
+@app.get("/api/clean/scans/{scan_id}")
+async def api_cleanup_scan(scan_id: str, session: dict = Depends(get_session)):
+    scan = await get_cleanup_scan(session.get("uid", ""), scan_id)
+    if scan is None:
+        raise HTTPException(status_code=404, detail="清理扫描不存在")
+    return {"scan": scan}
+
+
+@app.post("/api/clean/scans/{scan_id}/execute", dependencies=[Depends(require_trusted_origin)])
+async def api_execute_cleanup_scan(scan_id: str, req: CleanupExecuteRequest, session: dict = Depends(get_session)):
+    uid = session.get("uid", "")
+    cookies = session.get("bili_cookies", {})
+    csrf = cookies.get("bili_jct", "")
+    if not csrf:
+        raise HTTPException(status_code=400, detail="缺少 bili_jct (csrf) cookie")
+    requested = [(item.folder_id, item.media_id) for item in req.items]
+    candidates = await claim_cleanup_scan_execution(uid, scan_id, requested)
+    if candidates is None:
+        raise HTTPException(status_code=409, detail="扫描不存在、未完成或正在执行")
+
+    removed = 0
+    skipped = 0
+    failed = 0
+    try:
+        async with _client(cookies) as client:
+            for item in candidates:
+                folder_id = int(item["folder_id"])
+                media_id = int(item["media_id"])
+                status = await _check_bvid(item["bvid"], client)
+                if status != "invalid":
+                    skipped += 1
+                    await set_cleanup_item_execution(scan_id, folder_id, media_id, "skipped", "执行前复核未确认失效")
+                    continue
+                resp = await client.post(
+                    "https://api.bilibili.com/x/v3/fav/resource/batch-del",
+                    data={"media_id": folder_id, "resources": f"{media_id}:2", "csrf": csrf},
+                    timeout=30,
+                )
+                data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                if data.get("code") == 0:
+                    removed += 1
+                    await set_cleanup_item_execution(scan_id, folder_id, media_id, "removed", "已从收藏夹移除")
+                else:
+                    failed += 1
+                    await set_cleanup_item_execution(scan_id, folder_id, media_id, "failed", str(data.get("message") or "B站删除失败"))
+    finally:
+        await update_cleanup_scan(scan_id, status="completed", message="执行完成", finished_at=datetime.now(timezone.utc))
+
+    if removed:
+        await mark_sync_required(uid)
+        await record_operation(uid, "execute_cleanup_scan", {"scan_id": scan_id, "removed": removed, "skipped": skipped, "failed": failed})
+    return {"scan": await get_cleanup_scan(uid, scan_id), "removed": removed, "skipped": skipped, "failed": failed}
 
 
 @app.post("/api/clean/remove", dependencies=[Depends(require_trusted_origin)])

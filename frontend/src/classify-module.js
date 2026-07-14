@@ -1,178 +1,115 @@
-import { getFolders } from "./api.js";
-import { escapeAttr, escapeHtml, showInlineMessage } from "./ui.js";
+import {
+  createTopicAnalysis,
+  getFolders,
+  getLatestTopicAnalysis,
+  getTopicAnalysis,
+} from "./api.js";
+import { escapeAttr, escapeHtml, formatError, showInlineMessage } from "./ui.js";
 
-const SSE_BASE = "/api/analyze";
+const STATE_LABELS = {
+  active: "近期活跃",
+  cooling: "正在降温",
+  dormant: "已确认休眠",
+  historical: "历史兴趣",
+};
 
 export async function renderClassifyModule(container) {
   container.innerHTML = `
-    <div>
-      <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px;">
-        <select id="folderSelect" class="input" style="width:200px;">
-          <option value="">全部收藏夹</option>
-        </select>
-        <button id="analyzeBtn" class="btn">开始整理</button>
-        <button id="cancelBtn" class="btn btn-secondary" style="display:none;">取消</button>
+    <div class="topic-tool">
+      <div class="tool-command-row">
+        <select id="topicFolder" class="input"><option value="">全部收藏夹</option></select>
+        <button id="topicAnalyze" class="btn" type="button">生成主题地图</button>
       </div>
-      <div id="progressArea" style="display:none;margin-bottom:16px;">
-        <div class="bili-progress-area">
-          <div class="header-row">
-            <span class="icon" id="progressIcon">📂</span>
-            <span id="progressPhase" style="font-size:14px;color:#333;">正在收集收藏夹…</span>
-          </div>
-          <div class="bar-row">
-            <div class="bili-progress-bar">
-              <div class="fill" id="progressFill"></div>
-            </div>
-            <span class="pct" id="progressPct">0%</span>
-          </div>
-          <div class="info-row" id="progressInfo"></div>
-        </div>
-      </div>
-      <div id="analyzeResult"></div>
-    </div>
-  `;
+      <div id="topicStatus" class="task-status" hidden></div>
+      <div id="topicResult"><p class="empty-state">主题地图会从本地收藏快照生成，并复用未变化的数据结果。</p></div>
+    </div>`;
 
-  let abortCtrl = null;
-  let streamHandled = false;
+  const folder = container.querySelector("#topicFolder");
+  const button = container.querySelector("#topicAnalyze");
+  const status = container.querySelector("#topicStatus");
+  const result = container.querySelector("#topicResult");
 
-  const folderSelect = document.getElementById("folderSelect");
-  const btn = document.getElementById("analyzeBtn");
-  const cancelBtn = document.getElementById("cancelBtn");
-  const progressArea = document.getElementById("progressArea");
-  const progressFill = document.getElementById("progressFill");
-  const progressPct = document.getElementById("progressPct");
-  const progressPhase = document.getElementById("progressPhase");
-  const progressIcon = document.getElementById("progressIcon");
-  const progressInfo = document.getElementById("progressInfo");
-  const resultEl = document.getElementById("analyzeResult");
-
-  // 加载收藏夹列表
-  let folderList = [];
-  let estimatedTotal = 50;
   try {
     const data = await getFolders();
-    if (data.folders) {
-      folderList = data.folders;
-      for (const f of data.folders) {
-        const opt = document.createElement("option");
-        opt.value = f.id || f.media_id || "";
-        opt.textContent = f.title || "收藏夹";
-        folderSelect.appendChild(opt);
-      }
+    (data.folders || []).forEach(item => {
+      const option = document.createElement("option");
+      option.value = item.id || item.media_id;
+      option.textContent = `${item.title} (${Number(item.media_count || 0)})`;
+      folder.appendChild(option);
+    });
+    const latest = await getLatestTopicAnalysis();
+    if (latest.analysis) renderAnalysis(latest.analysis, result);
+  } catch (error) {
+    showInlineMessage(result, formatError(error, "主题分析记录加载失败"));
+  }
+
+  folder.addEventListener("change", async () => {
+    try {
+      const latest = await getLatestTopicAnalysis(folder.value || null);
+      if (latest.analysis) renderAnalysis(latest.analysis, result);
+      else result.innerHTML = `<p class="empty-state">这个范围还没有主题分析。</p>`;
+    } catch (error) {
+      showInlineMessage(result, formatError(error, "主题分析记录加载失败"));
     }
-  } catch (e) {}
+  });
 
-  folderSelect.addEventListener("change", () => {
-    const fid = folderSelect.value;
-    if (fid) {
-      const f = folderList.find(x => (x.id || x.media_id) == fid);
-      estimatedTotal = f ? f.media_count || 20 : 20;
-    } else {
-      estimatedTotal = Math.max(1, folderList.length * 20);
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    status.hidden = false;
+    status.textContent = "正在创建分析任务...";
+    try {
+      const data = await createTopicAnalysis(folder.value || null);
+      await pollAnalysis(data.analysis.id, status, result);
+    } catch (error) {
+      showInlineMessage(result, formatError(error, "主题分析启动失败"));
+    } finally {
+      button.disabled = false;
     }
   });
+}
 
-  btn.addEventListener("click", () => {
-    resultEl.innerHTML = "";
-    btn.disabled = true;
-    btn.style.display = "none";
-    cancelBtn.style.display = "inline-block";
-    progressArea.style.display = "block";
-    progressFill.style.width = "0%";
-    progressPct.textContent = "";
-    progressPhase.textContent = "正在抓取收藏夹…";
-    progressIcon.textContent = "📂";
-    progressInfo.textContent = "";
-
-    const fid = folderSelect.value;
-    const url = fid ? `${SSE_BASE}?folder_id=${fid}` : SSE_BASE;
-
-    abortCtrl = new AbortController();
-    streamHandled = false;
-    const es = new EventSource(url, { withCredentials: true });
-
-    es.addEventListener("progress", (e) => {
-      const d = JSON.parse(e.data);
-      const pct = Math.min(99, Math.round((d.total_collected / estimatedTotal) * 100));
-      progressFill.style.width = pct + "%";
-      progressPct.textContent = pct + "%";
-      progressPhase.textContent = "正在抓取收藏夹…";
-      progressIcon.textContent = "📂";
-      progressInfo.textContent = `已收集 ${d.total_collected} 条（${d.folder_name} 刚完成 ${d.folder_count} 条）`;
-    });
-
-    es.addEventListener("classifying", (e) => {
-      const d = JSON.parse(e.data);
-      progressFill.style.width = "100%";
-      progressPct.textContent = "100%";
-      progressPhase.textContent = "AI 正在分析分类…";
-      progressIcon.textContent = "🤖";
-      progressInfo.textContent = `抓取完成，共 ${d.total} 条，正在智能命名…`;
-    });
-
-    es.addEventListener("result", (e) => {
-      streamHandled = true;
-      es.close();
-      resetUI();
-      const data = JSON.parse(e.data);
-      renderResult(data, resultEl);
-    });
-
-    es.addEventListener("error", (e) => {
-      streamHandled = true;
-      es.close();
-      resetUI();
-      let msg = "请求失败";
-      try {
-        if (e.data) {
-          const d = JSON.parse(e.data);
-          if (d.error) msg = d.error;
-        }
-      } catch (_) {}
-      showInlineMessage(resultEl, msg);
-    });
-
-    es.onerror = () => {
-      if (streamHandled) return;
-      streamHandled = true;
-      es.close();
-      resetUI();
-      showInlineMessage(resultEl, "连接中断，请重试");
-    };
-
-    abortCtrl.signal.addEventListener("abort", () => {
-      es.close();
-    });
-  });
-
-  cancelBtn.addEventListener("click", () => {
-    streamHandled = true;
-    if (abortCtrl) abortCtrl.abort();
-    resetUI();
-  });
-
-  function resetUI() {
-    btn.disabled = false;
-    btn.style.display = "inline-block";
-    cancelBtn.style.display = "none";
+async function pollAnalysis(id, status, result) {
+  for (;;) {
+    const data = await getTopicAnalysis(id);
+    const analysis = data.analysis;
+    status.textContent = analysis.message || "正在分析";
+    if (analysis.status === "completed") {
+      status.hidden = true;
+      renderAnalysis(analysis, result);
+      return;
+    }
+    if (analysis.status === "failed") throw new Error(analysis.error_message || "主题分析失败");
+    await delay(900);
   }
 }
 
-function renderResult(data, resultEl) {
-  const categories = data.categories || [];
-  let html = `<p style="margin-bottom:16px;">共 ${Number(data.total || 0)} 条收藏，分为 ${categories.length} 类：</p>`;
-  for (const cat of categories) {
-    const items = cat.items || [];
-    html += `<div class="result-card">
-      <h3>${escapeHtml(cat.name)} <span class="item-count">（${items.length}）</span></h3>
-      <ul class="result-list">`;
-    for (const item of items) {
-      html += `<li>
-        <a href="${escapeAttr(item.link)}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
-        <span class="meta"> — ${escapeHtml(item.upper)}</span>
-      </li>`;
-    }
-    html += `</ul></div>`;
-  }
-  resultEl.innerHTML = html;
+function renderAnalysis(analysis, result) {
+  const clusters = analysis.clusters || [];
+  result.innerHTML = `
+    <div class="topic-summary"><strong>${Number(analysis.item_count || 0)} 条收藏</strong><span>${clusters.length} 个主题 · 快照 ${escapeHtml((analysis.snapshot_version || "").slice(0, 8))}</span></div>
+    <div class="topic-map" aria-label="收藏主题地图">
+      ${clusters.map((cluster, index) => {
+        const weight = Math.max(1, Number(cluster.item_count || 1));
+        return `<button class="topic-node state-${escapeAttr(cluster.interest_state)}" style="--topic-weight:${weight}" data-topic-index="${index}" type="button"><strong>${escapeHtml(cluster.name)}</strong><span>${weight} 条</span></button>`;
+      }).join("")}
+    </div>
+    <div class="topic-list">
+      ${clusters.map(cluster => renderCluster(cluster)).join("") || `<p class="empty-state">没有可展示的主题。</p>`}
+    </div>`;
+  result.querySelectorAll("[data-topic-index]").forEach(button => button.addEventListener("click", () => {
+    result.querySelectorAll(".topic-cluster")[Number(button.dataset.topicIndex)]?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }));
 }
+
+function renderCluster(cluster) {
+  const representatives = cluster.representative_items || [];
+  const creators = (cluster.upper_creators || []).map(item => `${item.name} ${item.count}`).join(" · ");
+  return `<section class="topic-cluster">
+    <div class="topic-cluster-head"><div><span class="eyebrow">${escapeHtml(STATE_LABELS[cluster.interest_state] || "兴趣主题")}</span><h3>${escapeHtml(cluster.name)}</h3></div><strong>${Number(cluster.item_count || 0)} 条</strong></div>
+    <p>${escapeHtml(cluster.summary || "")}</p>
+    ${creators ? `<small>常见 UP 主：${escapeHtml(creators)}</small>` : ""}
+    <div class="topic-representatives">${representatives.map(item => `<a href="${escapeAttr(item.link || "#")}" target="_blank" rel="noopener"><span>${escapeHtml(item.title || "未命名收藏")}</span><small>${escapeHtml(item.upper || "")}</small></a>`).join("")}</div>
+  </section>`;
+}
+
+function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
